@@ -1,0 +1,24 @@
+[toolchain]
+anchor_version = "1.2.1"
+solana_version = "3.1.14"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+card_escrow = "8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK"
+
+[programs.devnet]
+card_escrow = "8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK"
+
+[programs.mainnet]
+card_escrow = "8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK"
+
+[provider]
+cluster = "localnet"
+# Keypairs live outside the repo; see scripts/tc.sh for the mount.
+wallet = "~/.config/solana/card-escrow/deployer.json"
+
+[scripts]
+test = "cargo test -p card-escrow"

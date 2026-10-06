@@ -1,0 +1,36 @@
+# Build output
+target/
+.anchor/
+test-ledger/
+node_modules/
+
+# Secrets: keypairs and env files never live in the repo.
+*keypair*.json
+id.json
+**/keys/
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.ruff_cache/
+
+# Coverage artifacts
+lcov.info
+*.profraw
+.sbf-traces/
+
+# Local tooling / assistant files
+CLAUDE.md
+.claude/
+*.log
+issuer-ledger*.jsonl

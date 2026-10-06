@@ -1,0 +1,6 @@
+# Host toolchain for tests, clippy and IDL generation. SBF builds use the
+# platform-tools toolchain pinned by the Agave CLI version in Anchor.toml.
+[toolchain]
+channel = "1.91.1"
+components = ["clippy", "rustfmt", "llvm-tools-preview"]
+profile = "minimal"

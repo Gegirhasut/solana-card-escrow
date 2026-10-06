@@ -1,0 +1,42 @@
+[package]
+name = "card-escrow"
+version = "0.1.0"
+description = "Non-custodial escrow for crypto card top-ups with authorization holds"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "card_escrow"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.1", features = ["init-if-needed"] }
+anchor-spl = { version = "=1.2.1", default-features = false, features = ["solana-v3", "token", "token_2022", "associated_token"] }
+
+[dev-dependencies]
+litesvm = "=0.12.0"
+litesvm-token = { version = "=0.12.0", features = ["token-2022"] }
+solana-keypair = "3.0.1"
+solana-message = "3.0.1"
+solana-signer = "3.0.0"
+solana-transaction = "3.0.2"
+solana-transaction-error = "3"
+solana-instruction = "3"
+solana-clock = "3"
+solana-account = "3"
+base64 = "0.21"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
