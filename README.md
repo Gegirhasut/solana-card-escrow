@@ -14,10 +14,10 @@ issuer integration (authorization, clearing, reversal and refund webhooks).
 | Program ID | `8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK` |
 | Devnet | deployed — [explorer](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet); mock-issuer E2E + reconciliation run against it |
 | Mainnet | not planned: this is a reference implementation (checklist below for anyone who forks it) |
-| Verifiable build | on-chain hash `ec365992…c68d` = `solana-verify build` of this repo (Agave 3.1.14 image) |
+| Verifiable build | on-chain hash `981549c9…4332` = `solana-verify build` of this repo (Agave 3.1.14 image) |
 | security.txt | embedded; contact gegirhasut@gmail.com, see [SECURITY.md](SECURITY.md) |
-| Program tests | 66 passing (14 unit, 18 lifecycle, 34 security; LiteSVM against the SBF binary) |
-| Backend tests | 99 passing (93 unit/service + 6 chain integration on devnet) |
+| Program tests | 69 passing (14 unit, 18 lifecycle, 37 security; LiteSVM against the SBF binary) |
+| Backend tests | 119 passing (113 unit/service + 6 chain integration on devnet) |
 <!-- STATUS:END -->
 
 ---
@@ -284,7 +284,7 @@ uv run escrow-backend reconcile --ledger ledger.jsonl
 
 ## Test coverage
 
-**Program** (`scripts/tc.sh cargo test -p card-escrow`, 66 tests)
+**Program** (`scripts/tc.sh cargo test -p card-escrow`, 69 tests)
 
 - `src/state.rs` — 14 native unit tests of the money logic: reservation
   against the available balance, daily-limit and velocity-window rollover,
@@ -295,24 +295,24 @@ uv run escrow-backend reconcile --ledger ledger.jsonl
   withdraw, limits, authorize → full and partial capture, release, expiry by
   anyone after the TTL, refund, closing holds, pause, a full Token-2022 card
   lifecycle.
-- `tests/test_security.rs` — 34 negative tests: replayed auth and refund ids,
+- `tests/test_security.rs` — 37 negative tests: replayed auth and refund ids,
   capture above the hold or after expiry, early expiry, withdrawing held
   funds, limit boundaries, pause, every instruction with the wrong role
   (admin / operator / owner / upgrade authority), foreign vault and hold
   combinations, wrong mints, Token-2022 mints with a permanent delegate,
-  `u64::MAX` amounts.
+  pausable, frozen default state or close authority, `u64::MAX` amounts.
 
-**Backend** (`uv run pytest --cov`, 99 tests, 75 % line+branch coverage)
+**Backend** (`uv run pytest --cov`, 119 tests, 75 % line+branch coverage)
 
 | Area | Tests | Coverage |
 |---|---|---|
 | Authorization decisions, idempotency, timeout budget | `test_authorizations.py`, `test_decision.py` | 98–100 % |
-| Clearing / reversal / refund operations | `test_operations.py` | 97 % |
-| Worker (retries, expiry crank, orphan-hold compensation) | `test_worker.py` | 85 % |
+| Clearing / reversal / refund operations: leases, backoff, one success per hold | `test_operations.py` | 96 % |
+| Worker (retries, undecided-row sweep, expiry crank, orphan-hold compensation) | `test_worker.py` | 86 % |
 | Three-way reconciliation | `test_reconcile.py` | 95 % |
-| Webhook HMAC, API | `test_webhook_auth.py`, `test_api.py` | 90–100 % |
-| Instruction encoding / account decoding | `test_program_client.py` | 100 % |
-| `RpcGateway` against a real cluster | `test_integration_chain.py` (`-m integration`) | 92 % |
+| Webhook HMAC, API, settings guards | `test_webhook_auth.py`, `test_api.py` | 89–100 % |
+| Instruction encoding / account decoding, error classification | `test_program_client.py` | 97 % |
+| `RpcGateway` against a real cluster | `test_integration_chain.py` (`-m integration`) | 86 % |
 
 The uncovered remainder is operator tooling exercised by hand rather than by
 pytest: `bootstrap.py`, `cli.py` and the `mock-issuer` itself.
@@ -322,17 +322,17 @@ capture, reversal, refund with a duplicate delivery, sequential and concurrent
 duplicate authorizations and clearings, insufficient funds, daily limit, a hold
 left to expire, a forged signature, a clearing for an unknown authorization).
 `escrow-backend reconcile` then compares the issuer ledger, the DB and the chain.
-After three full runs: 41 authorizations and 4 refunds checked, 0 mismatches.
+After four full runs: 53 authorizations and 5 refunds checked, 0 mismatches.
 
 On the public devnet RPC (`api.devnet.solana.com`) an authorization
 occasionally misses its budget because the RPC rate-limits (HTTP 429) or stalls.
 That is the designed failure mode, and the runs show it working: the backend
 declines (fail-closed); if the hold still lands on chain, the worker releases
 it as an orphan (`worker.orphan_hold_released`); reconciliation stays clean.
-With the devnet settings above, each full run lost one flow this way (`reversal`, later
-`duplicate_concurrent_auth+clearing`, 10/11 passed); each passes when run on its
-own. Use a dedicated RPC for
-anything beyond a demo.
+With the devnet settings above, each full run lost one flow this way
+(`reversal`, `duplicate_concurrent_auth+clearing`, `partial_capture` in
+different runs; 10/11 passed); each passes when run on its own. Use a
+dedicated RPC for anything beyond a demo.
 
 ## Deployments
 
@@ -341,8 +341,8 @@ anything beyond a demo.
 | | |
 |---|---|
 | Program | [`8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK`](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet) |
-| ProgramData | `5pAGGdZUMWY6LxguFrotqAUPipkTRMUXPWzP9AbkUxYk` (425 520 bytes, upgraded in slot 508453950) |
-| Executable hash | `ec365992e955dc609c9461766a0bbf6e29aca232b77eca85a71a318bc07dc68d` |
+| ProgramData | `5pAGGdZUMWY6LxguFrotqAUPipkTRMUXPWzP9AbkUxYk` (425 520 bytes, upgraded in slot 508488595) |
+| Executable hash | `981549c90711a772ff3d174940d112a727bc2bb30de867134b9372f080814332` |
 | Upgrade authority | `7y5DrhLP9cBTUg4bLkQb35bxndyTY6K3FSGNTPYt2PyJ` |
 | Config PDA | `4i9JsD6ynYg6ik2c3LHGcKWhcczRTcpizqUppCdhoGBb` |
 | Test mint (6 decimals, not USDC) | `8MoGqRKufpjLVh9CupJabohLu7FTdAcFK7YaWQRdFFdy` |
@@ -371,7 +371,7 @@ solana-verify get-executable-hash target/deploy/card_escrow.so
 solana-verify get-program-hash -u devnet 8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK
 ```
 
-On devnet both print `ec365992…c68d`. Solana Explorer still shows *Program Not
+On devnet both print `981549c9…4332`. Solana Explorer still shows *Program Not
 Verified* there: the OtterSec verification service that sets that badge only
 accepts mainnet programs. On mainnet the badge would come from step 4 of the
 checklist below.
