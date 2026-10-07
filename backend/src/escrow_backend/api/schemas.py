@@ -5,6 +5,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 _ID = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_\-:.]+$")
+# Strict JSON integers (no bools, strings or floats); the cap keeps
+# amount * 10**(mint_decimals - currency_exponent) far inside int64.
+MAX_MINOR = 10**12
+_ID_OPTIONAL = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_\-:.]+$")
 
 
 class _Strict(BaseModel):
@@ -14,7 +18,7 @@ class _Strict(BaseModel):
 class AuthorizationWebhook(_Strict):
     auth_id: str = _ID
     card_id: str = Field(min_length=1, max_length=64)
-    amount: int = Field(ge=0, description="Minor currency units (cents)")
+    amount: int = Field(ge=0, le=MAX_MINOR, strict=True, description="Minor currency units (cents)")
     currency: str = Field(min_length=3, max_length=3)
     merchant: dict[str, Any] | None = None
 
@@ -22,7 +26,7 @@ class AuthorizationWebhook(_Strict):
 class ClearingWebhook(_Strict):
     clearing_id: str = _ID
     auth_id: str = _ID
-    amount: int = Field(gt=0, description="Minor currency units (cents)")
+    amount: int = Field(gt=0, le=MAX_MINOR, strict=True, description="Minor currency units (cents)")
 
 
 class ReversalWebhook(_Strict):
@@ -33,5 +37,5 @@ class ReversalWebhook(_Strict):
 class RefundWebhook(_Strict):
     refund_id: str = _ID
     card_id: str = Field(min_length=1, max_length=64)
-    amount: int = Field(gt=0, description="Minor currency units (cents)")
-    auth_id: str | None = None
+    amount: int = Field(gt=0, le=MAX_MINOR, strict=True, description="Minor currency units (cents)")
+    auth_id: str | None = _ID_OPTIONAL

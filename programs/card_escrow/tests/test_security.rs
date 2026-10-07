@@ -2,9 +2,13 @@
 //! foreign accounts and overflow attempts.
 mod common;
 
-use anchor_lang::error::ErrorCode as Anchor;
+use anchor_lang::{
+    error::ErrorCode as Anchor, prelude::Pubkey, solana_program::instruction::Instruction,
+};
 use anchor_spl::token_2022::spl_token_2022::{
-    self, extension::ExtensionType, state::Mint as MintState,
+    self,
+    extension::ExtensionType,
+    state::{AccountState, Mint as MintState},
 };
 use card_escrow::{
     constants::{MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS, SECONDS_PER_DAY},
@@ -96,8 +100,14 @@ fn capture_more_than_hold_fails() {
     let user = take_user(&mut env);
     let id = auth_id(1);
     assert_ok(env.authorize(&user, id, 100 * USD));
-    assert_escrow_err(env.capture(&user, id, 100 * USD + 1), EscrowError::CaptureExceedsHold);
-    assert_escrow_err(env.capture(&user, id, u64::MAX), EscrowError::CaptureExceedsHold);
+    assert_escrow_err(
+        env.capture(&user, id, 100 * USD + 1),
+        EscrowError::CaptureExceedsHold,
+    );
+    assert_escrow_err(
+        env.capture(&user, id, u64::MAX),
+        EscrowError::CaptureExceedsHold,
+    );
     assert_escrow_err(env.capture(&user, id, 0), EscrowError::ZeroAmount);
     assert_eq!(env.hold(&user, &id).status, HoldStatus::Pending);
 }
@@ -109,19 +119,28 @@ fn capture_and_release_require_pending() {
     // Captured
     assert_ok(env.authorize(&user, auth_id(1), 10 * USD));
     assert_ok(env.capture(&user, auth_id(1), 5 * USD));
-    assert_escrow_err(env.capture(&user, auth_id(1), USD), EscrowError::HoldNotPending);
+    assert_escrow_err(
+        env.capture(&user, auth_id(1), USD),
+        EscrowError::HoldNotPending,
+    );
     assert_escrow_err(env.release(&user, auth_id(1)), EscrowError::HoldNotPending);
     // Released
     assert_ok(env.authorize(&user, auth_id(2), 10 * USD));
     assert_ok(env.release(&user, auth_id(2)));
-    assert_escrow_err(env.capture(&user, auth_id(2), USD), EscrowError::HoldNotPending);
+    assert_escrow_err(
+        env.capture(&user, auth_id(2), USD),
+        EscrowError::HoldNotPending,
+    );
     assert_escrow_err(env.release(&user, auth_id(2)), EscrowError::HoldNotPending);
     // Expired
     assert_ok(env.authorize(&user, auth_id(3), 10 * USD));
     env.advance(DEFAULT_TTL);
     let op = env.operator.insecure_clone();
     assert_ok(env.send(&[env.ix_expire(&user, auth_id(3))], &[&op]));
-    assert_escrow_err(env.capture(&user, auth_id(3), USD), EscrowError::HoldNotPending);
+    assert_escrow_err(
+        env.capture(&user, auth_id(3), USD),
+        EscrowError::HoldNotPending,
+    );
     assert_escrow_err(env.release(&user, auth_id(3)), EscrowError::HoldNotPending);
     assert_escrow_err(
         env.send(&[env.ix_expire(&user, auth_id(3))], &[&op]),
@@ -198,7 +217,10 @@ fn withdraw_blocked_by_held_funds() {
         env.withdraw(&user, INITIAL_DEPOSIT - 300 * USD + 1),
         EscrowError::InsufficientAvailableBalance,
     );
-    assert_escrow_err(env.withdraw(&user, INITIAL_DEPOSIT), EscrowError::InsufficientAvailableBalance);
+    assert_escrow_err(
+        env.withdraw(&user, INITIAL_DEPOSIT),
+        EscrowError::InsufficientAvailableBalance,
+    );
     assert_ok(env.withdraw(&user, INITIAL_DEPOSIT - 300 * USD));
     assert_eq!(env.balance(&user.vault_ata), 300 * USD);
     // The hold can still be captured in full.
@@ -217,7 +239,10 @@ fn authorize_more_than_available_fails() {
         EscrowError::InsufficientAvailableBalance,
     );
     assert_ok(env.authorize(&user, auth_id(3), 400 * USD));
-    assert_escrow_err(env.authorize(&user, auth_id(4), 1), EscrowError::InsufficientAvailableBalance);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(4), 1),
+        EscrowError::InsufficientAvailableBalance,
+    );
     assert_escrow_err(env.authorize(&user, auth_id(5), 0), EscrowError::ZeroAmount);
 }
 
@@ -240,26 +265,41 @@ fn daily_limit_boundary_and_rollover() {
     set_limits(&mut env, &user, limits(100 * USD, 100, 60));
     assert_ok(env.authorize(&user, auth_id(1), 60 * USD));
     assert_ok(env.authorize(&user, auth_id(2), 40 * USD)); // exactly at limit
-    assert_escrow_err(env.authorize(&user, auth_id(3), 1), EscrowError::DailyLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(3), 1),
+        EscrowError::DailyLimitExceeded,
+    );
 
     // A release gives the amount back to today's limit.
     assert_ok(env.release(&user, auth_id(2)));
     assert_ok(env.authorize(&user, auth_id(4), 40 * USD));
-    assert_escrow_err(env.authorize(&user, auth_id(5), 1), EscrowError::DailyLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(5), 1),
+        EscrowError::DailyLimitExceeded,
+    );
 
     // One second before rollover: still blocked.
     env.warp_to(START_TS + SECONDS_PER_DAY - 1);
-    assert_escrow_err(env.authorize(&user, auth_id(6), 1), EscrowError::DailyLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(6), 1),
+        EscrowError::DailyLimitExceeded,
+    );
     // At rollover the window restarts.
     env.warp_to(START_TS + SECONDS_PER_DAY);
     assert_ok(env.authorize(&user, auth_id(7), 100 * USD));
     let v = env.vault(&user);
-    assert_eq!((v.day_start_ts, v.daily_spent), (START_TS + SECONDS_PER_DAY, 100 * USD));
+    assert_eq!(
+        (v.day_start_ts, v.daily_spent),
+        (START_TS + SECONDS_PER_DAY, 100 * USD)
+    );
 
     // Releasing yesterday's hold does not inflate today's remaining limit.
     assert_ok(env.release(&user, auth_id(1)));
     assert_eq!(env.vault(&user).daily_spent, 100 * USD);
-    assert_escrow_err(env.authorize(&user, auth_id(8), 1), EscrowError::DailyLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(8), 1),
+        EscrowError::DailyLimitExceeded,
+    );
 }
 
 #[test]
@@ -271,12 +311,21 @@ fn velocity_limit_boundary_and_rollover() {
         assert_ok(env.authorize(&user, auth_id(n), USD));
         env.advance(10);
     }
-    assert_escrow_err(env.authorize(&user, auth_id(10), USD), EscrowError::VelocityLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(10), USD),
+        EscrowError::VelocityLimitExceeded,
+    );
     // Releases do not refund velocity: count is about attempts, not amounts.
     assert_ok(env.release(&user, auth_id(0)));
-    assert_escrow_err(env.authorize(&user, auth_id(11), USD), EscrowError::VelocityLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(11), USD),
+        EscrowError::VelocityLimitExceeded,
+    );
     env.warp_to(START_TS + 599);
-    assert_escrow_err(env.authorize(&user, auth_id(12), USD), EscrowError::VelocityLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(12), USD),
+        EscrowError::VelocityLimitExceeded,
+    );
     env.warp_to(START_TS + 600);
     assert_ok(env.authorize(&user, auth_id(13), USD));
     let v = env.vault(&user);
@@ -288,9 +337,15 @@ fn zero_limits_freeze_card_but_not_withdrawals() {
     let mut env = Env::new();
     let user = take_user(&mut env);
     set_limits(&mut env, &user, limits(0, 5, 60));
-    assert_escrow_err(env.authorize(&user, auth_id(1), USD), EscrowError::DailyLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(1), USD),
+        EscrowError::DailyLimitExceeded,
+    );
     set_limits(&mut env, &user, limits(USD, 0, 60));
-    assert_escrow_err(env.authorize(&user, auth_id(1), USD), EscrowError::VelocityLimitExceeded);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(1), USD),
+        EscrowError::VelocityLimitExceeded,
+    );
     assert_ok(env.withdraw(&user, INITIAL_DEPOSIT));
 }
 
@@ -300,11 +355,17 @@ fn invalid_velocity_window_rejected() {
     let user = take_user(&mut env);
     for w in [0, -1, SECONDS_PER_DAY + 1] {
         let ix = env.ix_set_limits(&user.pubkey(), &user.vault, limits(1, 1, w));
-        assert_escrow_err(env.send(&[ix], &[&user.kp]), EscrowError::InvalidVelocityWindow);
+        assert_escrow_err(
+            env.send(&[ix], &[&user.kp]),
+            EscrowError::InvalidVelocityWindow,
+        );
     }
     let other = env.new_user();
     let ix = env.ix_open_vault(&other, limits(1, 1, 0));
-    assert_escrow_err(env.send(&[ix], &[&other.kp]), EscrowError::InvalidVelocityWindow);
+    assert_escrow_err(
+        env.send(&[ix], &[&other.kp]),
+        EscrowError::InvalidVelocityWindow,
+    );
 }
 
 // ------------------------------------------------------------------ pause
@@ -347,7 +408,10 @@ fn initialize_config_only_by_upgrade_authority() {
     let mut env = Env::bare(anchor_spl::token::ID);
     let attacker = funded(&mut env);
     let ix = env.ix_initialize_config(&attacker.pubkey(), DEFAULT_TTL);
-    assert_escrow_err(env.send(&[ix], &[&attacker]), EscrowError::NotUpgradeAuthority);
+    assert_escrow_err(
+        env.send(&[ix], &[&attacker]),
+        EscrowError::NotUpgradeAuthority,
+    );
 
     // An immutable program (no authority) cannot be initialized by anyone.
     set_upgrade_authority(&mut env.svm, None);
@@ -388,14 +452,22 @@ fn initialize_config_validates_inputs() {
         .send()
         .unwrap();
     let ix = env.ix_initialize_config_with(&admin.pubkey(), &mint, &foreign, DEFAULT_TTL);
-    assert_escrow_err(env.send(&[ix], &[&admin]), EscrowError::SettlementOwnerMismatch);
+    assert_escrow_err(
+        env.send(&[ix], &[&admin]),
+        EscrowError::SettlementOwnerMismatch,
+    );
     // Settlement account of a different mint.
     let other_mint = CreateMint::new(&mut env.svm, &stranger)
         .decimals(6)
         .token_program_id(&tp)
         .send()
         .unwrap();
-    let ix = env.ix_initialize_config_with(&admin.pubkey(), &other_mint, &env.settlement_ata, DEFAULT_TTL);
+    let ix = env.ix_initialize_config_with(
+        &admin.pubkey(),
+        &other_mint,
+        &env.settlement_ata,
+        DEFAULT_TTL,
+    );
     assert_anchor_err(env.send(&[ix], &[&admin]), Anchor::ConstraintTokenMint);
 }
 
@@ -403,7 +475,11 @@ fn initialize_config_validates_inputs() {
 fn admin_instructions_reject_non_admin() {
     let mut env = Env::new();
     let op = env.operator.insecure_clone();
-    for signer in [op, env.user.kp.insecure_clone(), env.settlement_authority.insecure_clone()] {
+    for signer in [
+        op,
+        env.user.kp.insecure_clone(),
+        env.settlement_authority.insecure_clone(),
+    ] {
         let ix = env.ix_set_paused(&signer.pubkey(), true);
         assert_escrow_err(env.send(&[ix], &[&signer]), EscrowError::Unauthorized);
         let args = UpdateConfigArgs {
@@ -432,7 +508,10 @@ fn update_config_validates_inputs() {
         ..Default::default()
     };
     let ix = env.ix_update_config(&admin.pubkey(), &env.settlement_ata, args);
-    assert_escrow_err(env.send(&[ix], &[&admin]), EscrowError::SettlementOwnerMismatch);
+    assert_escrow_err(
+        env.send(&[ix], &[&admin]),
+        EscrowError::SettlementOwnerMismatch,
+    );
 }
 
 #[test]
@@ -494,7 +573,10 @@ fn operator_cannot_touch_user_funds_or_limits() {
         &op_ata,
         10 * USD,
     );
-    assert_escrow_err(env.send(&[ix], &[&op]), EscrowError::InvalidSettlementAccount);
+    assert_escrow_err(
+        env.send(&[ix], &[&op]),
+        EscrowError::InvalidSettlementAccount,
+    );
     assert_eq!(env.balance(&user.vault_ata), INITIAL_DEPOSIT);
 }
 
@@ -541,7 +623,13 @@ fn refund_rejects_wrong_signer_and_account() {
     let op = env.operator.insecure_clone();
     let admin = env.admin.insecure_clone();
     for signer in [&op, &admin, &user.kp] {
-        let ix = env.ix_refund_raw(&signer.pubkey(), &user, &env.settlement_ata, auth_id(1), USD);
+        let ix = env.ix_refund_raw(
+            &signer.pubkey(),
+            &user,
+            &env.settlement_ata,
+            auth_id(1),
+            USD,
+        );
         assert_escrow_err(env.send(&[ix], &[signer]), EscrowError::Unauthorized);
     }
     // Correct signer, but a different source token account it also owns.
@@ -554,7 +642,10 @@ fn refund_rejects_wrong_signer_and_account() {
         .send()
         .unwrap();
     let ix = env.ix_refund_raw(&sa.pubkey(), &user, &side, auth_id(1), USD);
-    assert_escrow_err(env.send(&[ix], &[&sa]), EscrowError::InvalidSettlementAccount);
+    assert_escrow_err(
+        env.send(&[ix], &[&sa]),
+        EscrowError::InvalidSettlementAccount,
+    );
 }
 
 // --------------------------------------------------------- foreign accounts
@@ -569,10 +660,24 @@ fn foreign_vault_and_hold_combinations_fail() {
     let hold_a = hold_pda(&a.vault, &auth_id(1));
 
     // Capture A's hold while debiting B's vault.
-    let ix = env.ix_capture_raw(&op.pubkey(), &b.vault, &hold_a, &b.vault_ata, &env.settlement_ata, USD);
+    let ix = env.ix_capture_raw(
+        &op.pubkey(),
+        &b.vault,
+        &hold_a,
+        &b.vault_ata,
+        &env.settlement_ata,
+        USD,
+    );
     assert_anchor_err(env.send(&[ix], &[&op]), Anchor::ConstraintSeeds);
     // A's hold + vault, but B's token account.
-    let ix = env.ix_capture_raw(&op.pubkey(), &a.vault, &hold_a, &b.vault_ata, &env.settlement_ata, USD);
+    let ix = env.ix_capture_raw(
+        &op.pubkey(),
+        &a.vault,
+        &hold_a,
+        &b.vault_ata,
+        &env.settlement_ata,
+        USD,
+    );
     assert!(env.send(&[ix], &[&op]).is_err());
     // Release A's hold against B's vault (would corrupt B's held_total).
     let ix = env.ix_release_raw(&op.pubkey(), &b.vault, &hold_a);
@@ -609,14 +714,32 @@ fn wrong_mint_is_rejected_everywhere() {
         .unwrap();
 
     // Deposit with a fake mint.
-    let mut ix = env.ix_deposit_raw(&user.pubkey(), &user.vault, &user.vault_ata, &fake_wallet, USD);
+    let mut ix = env.ix_deposit_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &fake_wallet,
+        USD,
+    );
     ix.accounts[2].pubkey = fake_mint;
     assert_escrow_err(env.send(&[ix], &[&user.kp]), EscrowError::InvalidMint);
     // Deposit from a token account of another mint.
-    let ix = env.ix_deposit_raw(&user.pubkey(), &user.vault, &user.vault_ata, &fake_wallet, USD);
+    let ix = env.ix_deposit_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &fake_wallet,
+        USD,
+    );
     assert_anchor_err(env.send(&[ix], &[&user.kp]), Anchor::ConstraintTokenMint);
     // Withdraw into a token account of another mint.
-    let ix = env.ix_withdraw_raw(&user.pubkey(), &user.vault, &user.vault_ata, &fake_wallet, USD);
+    let ix = env.ix_withdraw_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &fake_wallet,
+        USD,
+    );
     assert_anchor_err(env.send(&[ix], &[&user.kp]), Anchor::ConstraintTokenMint);
     // Authorize with a fake mint.
     let mut ix = env.ix_authorize(&user, auth_id(1), USD);
@@ -638,7 +761,13 @@ fn deposit_from_someone_elses_token_account_fails() {
     let mut env = Env::new();
     let user = take_user(&mut env);
     let victim = env.new_user();
-    let ix = env.ix_deposit_raw(&user.pubkey(), &user.vault, &user.vault_ata, &victim.wallet_ata, USD);
+    let ix = env.ix_deposit_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &victim.wallet_ata,
+        USD,
+    );
     assert_anchor_err(env.send(&[ix], &[&user.kp]), Anchor::ConstraintTokenOwner);
 }
 
@@ -646,18 +775,26 @@ fn deposit_from_someone_elses_token_account_fails() {
 fn withdraw_to_own_vault_account_is_rejected() {
     let mut env = Env::new();
     let user = take_user(&mut env);
-    let ix = env.ix_withdraw_raw(&user.pubkey(), &user.vault, &user.vault_ata, &user.vault_ata, USD);
+    let ix = env.ix_withdraw_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &user.vault_ata,
+        USD,
+    );
     assert!(env.send(&[ix], &[&user.kp]).is_err());
 }
 
-#[test]
-fn token_2022_mint_with_permanent_delegate_is_rejected() {
+/// Creates a Token-2022 mint carrying `ext` (initialised by `init_ext`) and
+/// asserts that initialize_config refuses it.
+fn assert_token_2022_extension_rejected(
+    ext: ExtensionType,
+    init_ext: impl FnOnce(&Pubkey, &Pubkey) -> Instruction,
+) {
     let mut env = Env::bare(anchor_spl::token_2022::ID);
     let admin = env.admin.insecure_clone();
     let mint_kp = Keypair::new();
-    let space =
-        ExtensionType::try_calculate_account_len::<MintState>(&[ExtensionType::PermanentDelegate])
-            .unwrap();
+    let space = ExtensionType::try_calculate_account_len::<MintState>(&[ext]).unwrap();
     let rent = env.svm.minimum_balance_for_rent_exemption(space);
     let ixs = vec![
         anchor_lang::solana_program::system_instruction::create_account(
@@ -667,17 +804,13 @@ fn token_2022_mint_with_permanent_delegate_is_rejected() {
             space as u64,
             &spl_token_2022::ID,
         ),
-        spl_token_2022::instruction::initialize_permanent_delegate(
-            &spl_token_2022::ID,
-            &mint_kp.pubkey(),
-            &admin.pubkey(),
-        )
-        .unwrap(),
+        init_ext(&mint_kp.pubkey(), &admin.pubkey()),
+        // A freeze authority is required for a frozen default account state.
         spl_token_2022::instruction::initialize_mint2(
             &spl_token_2022::ID,
             &mint_kp.pubkey(),
             &admin.pubkey(),
-            None,
+            Some(&admin.pubkey()),
             6,
         )
         .unwrap(),
@@ -688,8 +821,56 @@ fn token_2022_mint_with_permanent_delegate_is_rejected() {
         .token_program_id(&spl_token_2022::ID)
         .send()
         .unwrap();
-    let ix = env.ix_initialize_config_with(&admin.pubkey(), &mint_kp.pubkey(), &settlement, DEFAULT_TTL);
-    assert_escrow_err(env.send(&[ix], &[&admin]), EscrowError::UnsupportedMintExtension);
+    let ix =
+        env.ix_initialize_config_with(&admin.pubkey(), &mint_kp.pubkey(), &settlement, DEFAULT_TTL);
+    assert_escrow_err(
+        env.send(&[ix], &[&admin]),
+        EscrowError::UnsupportedMintExtension,
+    );
+}
+
+#[test]
+fn token_2022_mint_with_permanent_delegate_is_rejected() {
+    assert_token_2022_extension_rejected(ExtensionType::PermanentDelegate, |mint, admin| {
+        spl_token_2022::instruction::initialize_permanent_delegate(&spl_token_2022::ID, mint, admin)
+            .unwrap()
+    });
+}
+
+#[test]
+fn token_2022_mint_with_pausable_is_rejected() {
+    assert_token_2022_extension_rejected(ExtensionType::Pausable, |mint, admin| {
+        spl_token_2022::extension::pausable::instruction::initialize(
+            &spl_token_2022::ID,
+            mint,
+            admin,
+        )
+        .unwrap()
+    });
+}
+
+#[test]
+fn token_2022_mint_with_frozen_default_account_state_is_rejected() {
+    assert_token_2022_extension_rejected(ExtensionType::DefaultAccountState, |mint, _| {
+        spl_token_2022::extension::default_account_state::instruction::initialize_default_account_state(
+            &spl_token_2022::ID,
+            mint,
+            &AccountState::Frozen,
+        )
+        .unwrap()
+    });
+}
+
+#[test]
+fn token_2022_mint_with_close_authority_is_rejected() {
+    assert_token_2022_extension_rejected(ExtensionType::MintCloseAuthority, |mint, admin| {
+        spl_token_2022::instruction::initialize_mint_close_authority(
+            &spl_token_2022::ID,
+            mint,
+            Some(admin),
+        )
+        .unwrap()
+    });
 }
 
 // ---------------------------------------------------------------- overflow
@@ -699,9 +880,17 @@ fn u64_max_amounts_fail_cleanly() {
     let mut env = Env::new();
     let user = take_user(&mut env);
     set_limits(&mut env, &user, limits(u64::MAX, u32::MAX, 60));
-    assert_escrow_err(env.authorize(&user, auth_id(1), u64::MAX), EscrowError::InsufficientAvailableBalance);
-    assert_escrow_err(env.withdraw(&user, u64::MAX), EscrowError::InsufficientAvailableBalance);
-    assert!(env.send(&[env.ix_deposit(&user, u64::MAX)], &[&user.kp]).is_err());
+    assert_escrow_err(
+        env.authorize(&user, auth_id(1), u64::MAX),
+        EscrowError::InsufficientAvailableBalance,
+    );
+    assert_escrow_err(
+        env.withdraw(&user, u64::MAX),
+        EscrowError::InsufficientAvailableBalance,
+    );
+    assert!(env
+        .send(&[env.ix_deposit(&user, u64::MAX)], &[&user.kp])
+        .is_err());
     assert!(env.refund(&user, auth_id(2), u64::MAX).is_err());
     assert_eq!(env.vault(&user).held_total, 0);
 }
@@ -717,7 +906,9 @@ fn held_total_near_u64_max_cannot_overflow() {
     let payer = env.mint_authority.insecure_clone();
     let mint = env.mint;
     let tp = env.token_program;
-    let supply = env.account::<anchor_spl::token_interface::Mint>(&mint).supply;
+    let supply = env
+        .account::<anchor_spl::token_interface::Mint>(&mint)
+        .supply;
     let headroom = u64::MAX - supply;
     MintTo::new(&mut env.svm, &payer, &mint, &user.vault_ata, headroom)
         .token_program_id(&tp)
@@ -725,9 +916,18 @@ fn held_total_near_u64_max_cannot_overflow() {
         .unwrap();
     assert_ok(env.authorize(&user, auth_id(1), headroom));
     assert_eq!(env.vault(&user).held_total, headroom);
-    assert_escrow_err(env.authorize(&user, auth_id(2), 1), EscrowError::InsufficientAvailableBalance);
-    assert_escrow_err(env.authorize(&user, auth_id(3), u64::MAX), EscrowError::InsufficientAvailableBalance);
-    assert_escrow_err(env.withdraw(&user, 1), EscrowError::InsufficientAvailableBalance);
+    assert_escrow_err(
+        env.authorize(&user, auth_id(2), 1),
+        EscrowError::InsufficientAvailableBalance,
+    );
+    assert_escrow_err(
+        env.authorize(&user, auth_id(3), u64::MAX),
+        EscrowError::InsufficientAvailableBalance,
+    );
+    assert_escrow_err(
+        env.withdraw(&user, 1),
+        EscrowError::InsufficientAvailableBalance,
+    );
     assert_ok(env.release(&user, auth_id(1)));
     assert_eq!(env.vault(&user).daily_spent, 0);
     assert_ok(env.authorize(&user, auth_id(4), headroom));

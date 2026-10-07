@@ -109,4 +109,63 @@ async def test_compensation_without_owner_and_already_final(ctx: Ctx) -> None:
 
 async def test_run_once_reports_stats(ctx: Ctx) -> None:
     stats = await ctx.worker.run_once()
-    assert stats == {"operations": 0, "compensated": 0, "expired": 0}
+    assert stats == {"operations": 0, "finalized": 0, "compensated": 0, "expired": 0}
+
+
+async def test_run_once_isolates_failing_jobs(ctx: Ctx) -> None:
+    async def boom() -> int:
+        raise RuntimeError("rpc down")
+
+    ctx.worker.retry_operations = boom  # type: ignore[method-assign]
+    await ctx.authorize("a1", 10 * USD)
+    ctx.clock.now += ctx.chain.ttl
+    stats = await ctx.worker.run_once()
+    assert (stats["operations"], stats["expired"]) == (0, 1)
+
+
+async def test_undecided_authorization_is_finalized_and_compensated(ctx: Ctx) -> None:
+    """The deciding request sent the authorize tx, then crashed before writing
+    a decision (or lost the DB). Nobody else would ever look at the row."""
+    await ctx.chain.authorize(OWNER, auth_id_bytes("crashed"), USD)
+    async with transaction(ctx.sm) as s:
+        s.add(
+            Authorization(
+                auth_id="crashed",
+                card_id="card_0001",
+                amount=USD,
+                currency="USD",
+                deadline_at=func.now() + timedelta(seconds=30),
+                state="pending",
+                owner_pubkey=str(OWNER),
+                authorize_attempted_at=func.now(),
+            )
+        )
+    assert await ctx.worker.finalize_stale() == 0  # still within its deadline
+    async with transaction(ctx.sm) as s:
+        await s.execute(update(Authorization).values(deadline_at=func.now() - timedelta(seconds=1)))
+    assert await ctx.worker.finalize_stale() == 1
+    r = await state(ctx, "crashed")
+    assert (r.decision, r.decline_reason, r.compensation) == (
+        "declined",
+        "timeout",
+        Compensation.PENDING,
+    )
+    assert await ctx.worker.compensate() == 1
+    assert ctx.chain.hold_of(OWNER, auth_id_bytes("crashed")).status == HoldStatus.RELEASED
+
+
+async def test_undecided_without_attempt_needs_no_compensation(ctx: Ctx) -> None:
+    async with transaction(ctx.sm) as s:
+        s.add(
+            Authorization(
+                auth_id="early",
+                card_id="card_0001",
+                amount=USD,
+                currency="USD",
+                deadline_at=func.now() - timedelta(seconds=1),
+                state="pending",
+            )
+        )
+    assert await ctx.worker.finalize_stale() == 1
+    r = await state(ctx, "early")
+    assert (r.decision, r.compensation) == ("declined", None)

@@ -130,7 +130,12 @@ impl UserVault {
 
     /// Removes a hold from `held_total` and gives the unused part back to the
     /// daily limit if the hold was counted in the current day window.
-    pub fn settle_hold(&mut self, hold_amount: u64, unused: u64, hold_created_ts: i64) -> Result<()> {
+    pub fn settle_hold(
+        &mut self,
+        hold_amount: u64,
+        unused: u64,
+        hold_created_ts: i64,
+    ) -> Result<()> {
         require!(unused <= hold_amount, EscrowError::MathOverflow);
         self.held_total = self
             .held_total
@@ -286,7 +291,10 @@ mod tests {
         assert_err!(v.record_authorization(0, 1_000, 1), ZeroAmount);
         v.held_total = 900;
         v.daily_spent = 900;
-        assert_err!(v.record_authorization(101, 1_000, 1), InsufficientAvailableBalance);
+        assert_err!(
+            v.record_authorization(101, 1_000, 1),
+            InsufficientAvailableBalance
+        );
         v.record_authorization(100, 1_000, 1).unwrap();
         assert_eq!(v.held_total, 1_000);
     }
@@ -306,9 +314,13 @@ mod tests {
         v.record_authorization(1_000, 5_000, 1).unwrap();
         assert_err!(v.record_authorization(1, 5_000, 2), DailyLimitExceeded);
         // One second before the window ends: still blocked.
-        assert_err!(v.record_authorization(1, 5_000, SECONDS_PER_DAY - 1), DailyLimitExceeded);
+        assert_err!(
+            v.record_authorization(1, 5_000, SECONDS_PER_DAY - 1),
+            DailyLimitExceeded
+        );
         // Exactly at the boundary the window rolls.
-        v.record_authorization(1_000, 5_000, SECONDS_PER_DAY).unwrap();
+        v.record_authorization(1_000, 5_000, SECONDS_PER_DAY)
+            .unwrap();
         assert_eq!(v.day_start_ts, SECONDS_PER_DAY);
         assert_eq!(v.daily_spent, 1_000);
     }
@@ -431,6 +443,9 @@ mod tests {
         assert!(validate_velocity_window(1).is_ok());
         assert!(validate_velocity_window(MAX_VELOCITY_WINDOW_SECONDS).is_ok());
         assert_err!(validate_velocity_window(0), InvalidVelocityWindow);
-        assert_err!(validate_velocity_window(MAX_VELOCITY_WINDOW_SECONDS + 1), InvalidVelocityWindow);
+        assert_err!(
+            validate_velocity_window(MAX_VELOCITY_WINDOW_SECONDS + 1),
+            InvalidVelocityWindow
+        );
     }
 }

@@ -105,6 +105,14 @@ async def engine() -> AsyncIterator[AsyncEngine]:
     await eng.dispose()
 
 
+@pytest.fixture(autouse=True)
+def no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries are due immediately in tests (test_retry_backoff covers the delay)."""
+    from escrow_backend.services import operations
+
+    monkeypatch.setattr(operations, "RETRY_BASE_S", 0)
+
+
 @pytest.fixture
 async def redis() -> AsyncIterator[Redis]:
     r = Redis.from_url(REDIS_URL)

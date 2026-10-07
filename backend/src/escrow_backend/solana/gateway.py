@@ -33,6 +33,7 @@ from escrow_backend.solana.program import (
     Hold,
     UserVault,
     decode_clock_unix_timestamp,
+    decode_refund_amount,
     decode_token_amount,
     error_name,
 )
@@ -40,6 +41,8 @@ from escrow_backend.solana.program import (
 log = structlog.get_logger(__name__)
 
 ACCOUNT_ALREADY_IN_USE = "AccountAlreadyInUse"
+INVALID_SETTLEMENT_ACCOUNT = "InvalidSettlementAccount"
+MEMO_PROGRAM_ID = Pubkey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
 
 
 class ChainError(Exception):
@@ -68,12 +71,15 @@ class ChainGateway(Protocol):
     async def snapshot(self, owner: Pubkey) -> VaultSnapshot: ...
     async def config(self) -> Config | None: ...
     async def authorize(self, owner: Pubkey, auth_id: bytes, amount: int) -> TxResult: ...
-    async def capture(self, owner: Pubkey, auth_id: bytes, amount: int) -> TxResult: ...
+    async def capture(
+        self, owner: Pubkey, auth_id: bytes, amount: int, memo: str = ""
+    ) -> TxResult: ...
     async def release(self, owner: Pubkey, auth_id: bytes) -> TxResult: ...
     async def expire(self, owner: Pubkey, auth_id: bytes) -> TxResult: ...
     async def refund(self, owner: Pubkey, refund_id: bytes, amount: int) -> TxResult: ...
     async def get_holds(self, holds: list[Pubkey]) -> dict[Pubkey, Hold | None]: ...
     async def accounts_exist(self, keys: list[Pubkey]) -> dict[Pubkey, bool]: ...
+    async def get_refund_amounts(self, keys: list[Pubkey]) -> dict[Pubkey, int | None]: ...
     async def close(self) -> None: ...
 
 
@@ -83,17 +89,22 @@ _CUSTOM_DEC = re.compile(r"Custom\((\d+)\)")
 
 
 def parse_program_error(text: str) -> str | None:
-    """Extracts the escrow error name (or a system error) from logs/errors."""
+    """Names the program error in logs/errors; None if there is no error code.
+
+    Any coded error is deterministic, so a name also means "do not retry":
+    escrow errors get their own name, Anchor framework errors `AnchorError<n>`,
+    token/system program errors `ProgramError<n>`.
+    """
     if m := _ERR_NUMBER.search(text):
-        return error_name(int(m.group(1)))
+        code = int(m.group(1))
+        return error_name(code) or f"AnchorError{code}"
     if "already in use" in text:
         return ACCOUNT_ALREADY_IN_USE
-    if m := _CUSTOM_HEX.search(text):
-        code = int(m.group(1), 16)
-        return ACCOUNT_ALREADY_IN_USE if code == 0 else error_name(code)
-    if m := _CUSTOM_DEC.search(text):
-        code = int(m.group(1))
-        return ACCOUNT_ALREADY_IN_USE if code == 0 else error_name(code)
+    if m := _CUSTOM_HEX.search(text) or _CUSTOM_DEC.search(text):
+        code = int(m.group(1), 16 if m.re is _CUSTOM_HEX else 10)
+        if code == 0:
+            return ACCOUNT_ALREADY_IN_USE
+        return error_name(code) or f"ProgramError{code}"
     return None
 
 
@@ -127,7 +138,10 @@ class RpcGateway:
     # ------------------------------------------------------------- reads
 
     async def config(self) -> Config | None:
-        resp = await self.client.get_account_info(self.program.pdas.config(), Confirmed)
+        try:
+            resp = await self.client.get_account_info(self.program.pdas.config(), Confirmed)
+        except Exception as e:
+            raise ChainError(f"config read failed: {e}", transient=True) from e
         return Config.decode(bytes(resp.value.data)) if resp.value else None
 
     async def snapshot(self, owner: Pubkey) -> VaultSnapshot:
@@ -160,7 +174,7 @@ class RpcGateway:
         out: dict[Pubkey, Hold | None] = {}
         for i in range(0, len(holds), 100):
             chunk = holds[i : i + 100]
-            resp = await self.client.get_multiple_accounts(chunk, Confirmed)
+            resp = await self._get_multiple(chunk)
             for pk, acc in zip(chunk, resp.value, strict=True):
                 out[pk] = Hold.decode(bytes(acc.data)) if acc else None
         return out
@@ -169,10 +183,25 @@ class RpcGateway:
         out: dict[Pubkey, bool] = {}
         for i in range(0, len(keys), 100):
             chunk = keys[i : i + 100]
-            resp = await self.client.get_multiple_accounts(chunk, Confirmed)
+            resp = await self._get_multiple(chunk)
             for pk, acc in zip(chunk, resp.value, strict=True):
                 out[pk] = acc is not None
         return out
+
+    async def get_refund_amounts(self, keys: list[Pubkey]) -> dict[Pubkey, int | None]:
+        out: dict[Pubkey, int | None] = {}
+        for i in range(0, len(keys), 100):
+            chunk = keys[i : i + 100]
+            resp = await self._get_multiple(chunk)
+            for pk, acc in zip(chunk, resp.value, strict=True):
+                out[pk] = decode_refund_amount(bytes(acc.data)) if acc else None
+        return out
+
+    async def _get_multiple(self, keys: list[Pubkey]):  # type: ignore[no-untyped-def]
+        try:
+            return await self.client.get_multiple_accounts(keys, Confirmed)
+        except Exception as e:  # network / RPC errors
+            raise ChainError(f"account read failed: {e}", transient=True) from e
 
     # ------------------------------------------------------------- writes
 
@@ -189,11 +218,15 @@ class RpcGateway:
         ix = self.program.authorize(op, op, owner, auth_id, amount)
         return await self._send([ix], [self.operator])
 
-    async def capture(self, owner: Pubkey, auth_id: bytes, amount: int) -> TxResult:
+    async def capture(self, owner: Pubkey, auth_id: bytes, amount: int, memo: str = "") -> TxResult:
         ix = self.program.capture(
             self.operator.pubkey(), owner, auth_id, await self._settlement(), amount
         )
-        return await self._send([ix], [self.operator])
+        # Two clearings of one hold for the same amount would otherwise build
+        # byte-identical transactions (same signature, deduplicated by the
+        # cluster) and both "succeed". The memo makes each clearing unique.
+        ixs = [ix, Instruction(MEMO_PROGRAM_ID, memo.encode(), [])] if memo else [ix]
+        return await self._send(ixs, [self.operator])
 
     async def release(self, owner: Pubkey, auth_id: bytes) -> TxResult:
         ix = self.program.release(self.operator.pubkey(), owner, auth_id)
@@ -236,6 +269,10 @@ class RpcGateway:
         except RPCException as e:
             text = str(e)
             name = parse_program_error(text)
+            if name == INVALID_SETTLEMENT_ACCOUNT:
+                # The admin rotated the settlement account: re-read the config.
+                self._settlement_ata = None
+                raise ChainError(text, name=name, transient=True) from e
             if "Blockhash not found" in text or "already been processed" in text:
                 # "Already processed": a different logical operation built the
                 # same bytes from the cached blockhash (e.g. two clearings of
@@ -266,7 +303,13 @@ class RpcGateway:
             if status is not None:
                 if status.err is not None:
                     name = parse_program_error(str(status.err))
-                    raise ChainError(f"transaction failed: {status.err}", name=name)
+                    if name == INVALID_SETTLEMENT_ACCOUNT:
+                        self._settlement_ata = None
+                    raise ChainError(
+                        f"transaction failed: {status.err}",
+                        name=name,
+                        transient=name in (None, INVALID_SETTLEMENT_ACCOUNT),
+                    )
                 if status.confirmation_status is not None and str(
                     status.confirmation_status
                 ).lower().endswith(("confirmed", "finalized")):

@@ -120,19 +120,37 @@ is constrained by seeds, `has_one`, `address`, or token constraints.
   permissionless — the user (or anyone) can free the funds after the TTL;
 - capture an expired, released or already-captured hold, or capture twice.
 
-**The admin can** rotate the operator / settlement account, change the default
-TTL of *future* holds, and pause. **The admin cannot** touch vault funds,
-change the mint, or block withdrawals: `withdraw` does not read `paused`.
+**The admin can** rotate the operator, the settlement authority and the
+settlement account, change the default TTL of *future* holds, and pause.
+**The admin cannot** change the mint, block withdrawals (`withdraw` does not
+read `paused`), or move funds directly. Because it can appoint the operator
+and the settlement account, though, the admin holds the operator's powers
+too (see residual trust).
 
-**Pause** blocks `authorize`, `capture` and `deposit` (no new value flows into
-or out of the system). `withdraw`, `release`, `expire_hold` and `refund` keep
-working because they only return value to users.
+**Pause** blocks `authorize`, `capture` and the `deposit` instruction.
+`withdraw`, `release`, `expire_hold` and `refund` keep working because they
+only return value to users. (Plain token transfers into a vault account are
+outside the program and are not blocked.)
 
-**Residual trust**, stated plainly: USDC's issuer can freeze token accounts; a
-compromised operator key can capture *currently held* amounts into the
-issuer's settlement account (bounded by the user's limits and holds, and
-visible on-chain); the program upgrade authority can change the code — see the
-upgrade authority plan below.
+**Residual trust**, stated plainly:
+- **Operator key.** A compromised operator key can create holds and capture
+  them straight away into the configured settlement account: up to each
+  vault's `daily_limit` per daily window and its velocity limit, until the
+  user lowers the limits (`set_limits`, e.g. `daily_limit = 0`) or withdraws.
+  Windows are fixed, not rolling, so up to two daily limits can go across a
+  window boundary. Every step is visible on-chain. Users choose the limits;
+  the limits are the bound.
+- **Admin key.** Can point the operator and settlement account at keys it
+  controls, so it carries the same bound. There is no timelock on rotation in
+  this reference implementation; a production deployment would put the admin
+  behind a multisig with a delay.
+- **Mint issuer.** USDC's issuer can freeze token accounts. Token-2022 mints
+  with extensions that would break custody or accounting are rejected at
+  `initialize_config` (transfer fees and hooks, permanent delegate,
+  non-transferable, confidential transfers, pausable, frozen default account
+  state, mint close authority).
+- **Upgrade authority.** Can change the code — see the upgrade authority plan
+  below.
 
 ## Authorization lifecycle
 
@@ -151,8 +169,20 @@ stateDiagram-v2
 Daily limit: sum of authorized amounts in a 24 h window that starts at the
 first authorization after the previous window ended. Released/expired holds
 and the unused part of a partial capture give their amount back to the
-current window. Velocity: number of authorizations per configurable window
-(not refunded by releases).
+window only if they were created in the current window. Velocity: number of
+authorizations per configurable window (not refunded by releases).
+
+**One capture per hold.** A hold is captured once (fully or partially; the
+rest is released). A second clearing for the same authorization (split
+shipment) and a clearing above the authorized amount (tips, fuel) are
+rejected (`hold_captured`, `capture_exceeds_authorization`) — a deliberate
+simplification: such clearings need a new authorization. The backend lets at
+most one clearing per authorization report success.
+
+Closing a final hold (`close_hold`, rent back to the payer) frees its
+`auth_id`. The backend never closes holds, so ids are never reused; an
+operator that does close holds must not reuse an `auth_id` while an old
+transaction for it could still land.
 
 ## Idempotency
 
@@ -176,10 +206,14 @@ retries cannot double-move funds. Issuer ids are mapped to seeds with
    out, the request declines with `timeout`, persisted through the same CAS —
    so there is never more than one answer per `auth_id`.
 2. **Clearing / reversal / refund** — `UNIQUE (kind, external_id)`; a lease
-   (`processing` + `lease_until`) ensures one executor; final responses are
-   stored and replayed; transient failures go to `retry` (HTTP 202) for the
-   worker. "Already done" chain errors are resolved by reading the on-chain
-   hold/refund state, and only for retries of the *same* operation.
+   (`processing` + `lease_until`) ensures one executor, and the result is
+   written only by the current lease holder (fenced by the attempt counter);
+   final responses are stored and replayed. Transient failures go to `retry`
+   (HTTP 202) with exponential backoff (5 s … 5 min); an ambiguous outcome is
+   never turned into "failed" — it is retried until the chain gives a definite
+   answer. "Already done" chain errors are resolved by reading the on-chain
+   hold/refund state. Each capture carries the clearing id as a memo, so two
+   clearings never produce the same transaction.
 
 ## Failure modes
 
@@ -187,20 +221,29 @@ retries cannot double-move funds. Issuer ids are mapped to seeds with
 |---|---|
 | Invalid / missing / stale webhook signature | 401, nothing parsed or stored (fail-closed) |
 | RPC down or slow during authorization | decline `chain_unavailable` / `timeout` |
-| Authorize tx lands **after** we declined (timeout, crash) | row flagged `compensation=pending`; worker releases the hold once seen, or marks `not_needed` after the blockhash landing window |
+| Authorize tx lands **after** we declined (timeout, crash) | row flagged `compensation=pending`; worker releases the hold once seen, or marks `not_needed` after a 120 s landing window |
+| Process or DB connection dies between sending `authorize` and writing the decision | worker declines undecided rows after their deadline (`timeout`) and compensates the hold |
 | Two authorizations race for the same balance | program is the arbiter: the loser fails preflight and is declined `insufficient_funds` |
 | Backend crashes after claiming an auth | duplicates settle it as `timeout` decline once the deadline passes |
 | Capture confirmation lost | retry hits `HoldNotPending`; on-chain `captured_amount` proves the earlier attempt landed |
+| Executor's lease expires mid-operation | another executor takes over; the stale one cannot overwrite its result |
+| Clearing arrives before the authorization is decided | retried, not failed |
+| Admin rotates the settlement account | the cached account is dropped and the operation retried |
 | Late presentment (clearing after hold expiry) | capture rejected `hold_expired`; surfaced to issuer as failed |
 | Operator disappears | users withdraw unheld funds anytime; holds expire permissionlessly |
-| Redis down | waiters fall back to DB polling; correctness only depends on Postgres |
-| DB / chain / issuer disagree | reconciliation reports every mismatch class (below) |
+| Redis down or hung | every Redis call is time-boxed; waiters fall back to DB polling; correctness only depends on Postgres |
+| Webhook secret left at the default | the service refuses to start (`chain=rpc` needs a random secret of ≥ 32 chars) |
+| DB / chain / issuer disagree | reconciliation reports the mismatch (below) |
 
-Reconciliation checks: `decision_mismatch`, `approved_without_hold`,
-`orphan_hold`, `state_mismatch`, `hold_amount_mismatch`,
+Reconciliation compares every authorization and refund known to the backend
+or the issuer ledger with the chain: `decision_mismatch`,
+`auth_amount_mismatch`, `approved_without_hold`, `orphan_hold`,
+`orphan_hold_compensation_pending`, `state_mismatch`, `hold_amount_mismatch`,
 `captured_amount_mismatch`, `issuer_clearing_mismatch`,
 `issuer_reversal_not_applied`, `cleared_declined_authorization`,
-`missing_in_backend`, `refund_chain_mismatch`, `refund_issuer_mismatch`.
+`missing_in_backend`, `refund_chain_mismatch`, `refund_amount_mismatch`,
+`refund_issuer_mismatch`. It does not scan the program for holds that neither
+side knows about (that would need `getProgramAccounts` on an indexed RPC).
 
 ## Running locally
 
@@ -209,11 +252,11 @@ The Solana toolchain runs in a pinned container (Agave 3.1.14, Anchor 1.2.1,
 Rust 1.91.1), so the host OS does not matter.
 
 ```bash
-# keypairs live outside the repo
-mkdir -p ~/.config/solana/card-escrow   # deployer/operator/settlement keys are created on first bootstrap
+# keypairs live outside the repo, in ~/.config/solana/card-escrow:
+# localnet.sh creates the deployer key, bootstrap the operator/settlement keys
 
 # 1. program: build + tests
-scripts/tc.sh anchor build
+scripts/build.sh
 scripts/tc.sh cargo test -p card-escrow
 
 # 2. local validator with the program preloaded
@@ -229,7 +272,8 @@ uv run pytest                            # unit + service tests
 uv run escrow-backend bootstrap --cluster localnet --out /tmp/localnet.json
 ESCROW_IT_BOOTSTRAP=/tmp/localnet.json uv run pytest -m integration
 
-# 4. end to end
+# 4. end to end (serve and mock-issuer share the webhook secret)
+export ESCROW_WEBHOOK_SECRET=$(openssl rand -hex 32)
 export ESCROW_MINT=$(jq -r .ESCROW_MINT /tmp/localnet.json)
 uv run escrow-backend register-card card_alice $(jq -r '."CARD:card_alice"' /tmp/localnet.json)
 uv run escrow-backend register-card card_bob   $(jq -r '."CARD:card_bob"'   /tmp/localnet.json)

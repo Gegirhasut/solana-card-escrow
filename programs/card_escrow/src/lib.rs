@@ -37,7 +37,10 @@ pub mod card_escrow {
 
     // ---- admin ----
 
-    pub fn initialize_config(ctx: Context<InitializeConfig>, args: InitializeConfigArgs) -> Result<()> {
+    pub fn initialize_config(
+        ctx: Context<InitializeConfig>,
+        args: InitializeConfigArgs,
+    ) -> Result<()> {
         instructions::admin::initialize_config(ctx, args)
     }
 

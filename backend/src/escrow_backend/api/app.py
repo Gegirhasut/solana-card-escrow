@@ -40,6 +40,7 @@ from escrow_backend.webhook_auth import SIGNATURE_HEADER, SignatureError, verify
 
 log = structlog.get_logger(__name__)
 M = TypeVar("M", bound=BaseModel)
+MAX_BODY_BYTES = 64 * 1024
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Services:
 def build_chain(settings: Settings) -> ChainGateway:
     program = EscrowProgram(
         program_id=Pubkey.from_string(settings.program_id),
+        # Empty only with chain=memory (Settings rejects it for rpc).
         mint=Pubkey.from_string(settings.mint) if settings.mint else Pubkey.default(),
         token_program=Pubkey.from_string(settings.token_program),
     )
@@ -91,7 +93,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = make_engine(settings.database_url)
         sm = make_sessionmaker(engine)
-        redis = Redis.from_url(settings.redis_url)
+        redis = Redis.from_url(settings.redis_url, socket_timeout=1, socket_connect_timeout=1)
         gw = chain or build_chain(settings)
         ops = OperationService(sm, gw)
         app.state.services = Services(
@@ -124,7 +126,15 @@ def create_app(
 
     async def authenticated(request: Request, model: type[M]) -> M:
         svc: Services = request.app.state.services
-        body = await request.body()
+        # Unauthenticated input: cap the size before buffering and verifying it.
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="payload too large")
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="payload too large")
         try:
             verify(
                 svc.settings.webhook_secret.get_secret_value().encode(),

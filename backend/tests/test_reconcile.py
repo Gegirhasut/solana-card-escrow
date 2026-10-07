@@ -150,6 +150,23 @@ async def test_cleared_declined_and_refund_chain_mismatch(ctx: Ctx, tmp_path: Pa
     assert ("rf1", "refund_chain_mismatch") in kinds
 
 
+async def test_refund_and_authorization_amounts_are_compared(ctx: Ctx, tmp_path: Path) -> None:
+    events = await scenario(ctx)
+    for e in events:
+        if e["type"] == "refund":
+            e["amount"] = 6 * USD  # issuer believes it refunded more
+        if e.get("auth_id") == "a2" and e["type"] == "authorization":
+            e["amount"] = 11 * USD
+    key = next(iter(ctx.chain.refunds))
+    ctx.chain.refunds[key] = 4 * USD  # and the chain recorded less
+    report = await reconcile(ctx.sm, ctx.chain, write_ledger(tmp_path / "l.jsonl", events))
+    found = {(m.key, m.kind): m.detail for m in report.mismatches}
+    assert found[("rf1", "refund_amount_mismatch")] == (
+        f"chain={4 * USD} backend={5 * USD} issuer={6 * USD}"
+    )
+    assert ("a2", "auth_amount_mismatch") in found
+
+
 async def test_works_without_ledger(ctx: Ctx) -> None:
     await scenario(ctx)
     report = await reconcile(ctx.sm, ctx.chain, None)

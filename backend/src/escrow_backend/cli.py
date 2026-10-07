@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import uvicorn
+from solders.pubkey import Pubkey
 from sqlalchemy.dialects.postgresql import insert
 
 from escrow_backend.api.app import build_chain, create_app
@@ -22,6 +23,7 @@ from escrow_backend.settings import get_settings
 
 
 async def _register_card(card_id: str, owner: str, status: str) -> None:
+    Pubkey.from_string(owner)  # reject a malformed owner before it reaches the DB
     s = get_settings()
     engine = make_engine(s.database_url)
     try:

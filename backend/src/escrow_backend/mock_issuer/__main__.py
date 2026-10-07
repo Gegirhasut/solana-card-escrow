@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
@@ -355,7 +356,11 @@ async def run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="mock-issuer")
     p.add_argument("--base-url", default="http://127.0.0.1:8000")
-    p.add_argument("--secret", default="dev-only-secret-change-me")
+    p.add_argument(
+        "--secret",
+        default=os.environ.get("ESCROW_WEBHOOK_SECRET", "dev-only-secret-change-me"),
+        help="webhook secret (default: $ESCROW_WEBHOOK_SECRET)",
+    )
     p.add_argument("--card", required=True, help="well-funded card id")
     p.add_argument("--limited-card", required=True, help="card with a low daily limit")
     p.add_argument("--ledger", default="issuer-ledger.jsonl")

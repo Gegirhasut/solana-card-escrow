@@ -18,6 +18,8 @@ jobs:
         run: scripts/build.sh
       - name: LiteSVM tests
         run: scripts/tc.sh cargo test -p card-escrow --tests
+      - name: Format
+        run: scripts/tc.sh cargo fmt -p card-escrow -- --check
       - name: Clippy
         run: scripts/tc.sh cargo clippy -p card-escrow --all-targets -- -D warnings
 

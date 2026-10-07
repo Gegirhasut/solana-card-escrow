@@ -2,6 +2,9 @@
 
 * `retry_operations`  - re-drives clearing/reversal/refund rows left in
   retry or with an expired lease.
+* `finalize_stale`    - declines authorizations that never got a decision
+  (the deciding request crashed or lost the DB after sending), so their
+  holds are compensated.
 * `compensate`        - releases holds that exist on-chain for declined
   authorizations (authorize tx landed after a timeout or crash).
 * `expire_holds`      - calls the permissionless `expire_hold` for approved
@@ -15,12 +18,14 @@ from datetime import timedelta
 
 import structlog
 from solders.pubkey import Pubkey
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from escrow_backend.db import transaction
+from escrow_backend.decision import Decision, DeclineReason
 from escrow_backend.ids import auth_id_bytes
 from escrow_backend.models import Authorization, AuthState, Compensation
+from escrow_backend.services.authorizations import render_response
 from escrow_backend.services.operations import OperationService
 from escrow_backend.solana.gateway import ChainError, ChainGateway
 from escrow_backend.solana.program import HoldStatus
@@ -49,11 +54,21 @@ class Worker:
         self.ops = operations
 
     async def run_once(self) -> dict[str, int]:
-        return {
-            "operations": await self.retry_operations(),
-            "compensated": await self.compensate(),
-            "expired": await self.expire_holds(),
+        stats: dict[str, int] = {}
+        jobs = {
+            "operations": self.retry_operations,
+            "finalized": self.finalize_stale,
+            "compensated": self.compensate,
+            "expired": self.expire_holds,
         }
+        for name, job in jobs.items():
+            # Isolated: an RPC outage in one job must not starve the others.
+            try:
+                stats[name] = await job()
+            except Exception as e:
+                log.exception("worker.job_failed", job=name, error=str(e))
+                stats[name] = 0
+        return stats
 
     async def run_forever(self, interval_s: float) -> None:
         while True:
@@ -68,9 +83,55 @@ class Worker:
     async def retry_operations(self) -> int:
         n = 0
         for kind, external_id in await self.ops.pending_ids():
-            await self.ops.process(kind, external_id)
+            try:
+                await self.ops.process(kind, external_id)
+            except Exception as e:
+                log.exception("worker.op_failed", kind=kind, id=external_id, error=str(e))
             n += 1
         return n
+
+    async def finalize_stale(self) -> int:
+        """Timeout-declines authorizations still undecided after their deadline.
+
+        Approvals are only written while `clock_timestamp() <= deadline_at`, so
+        once the deadline has passed nobody can approve any more and this
+        decline is the final answer. Attempted ones get flagged for
+        compensation, which releases a hold that may have landed.
+        """
+        async with transaction(self.sm) as s:
+            rows = (
+                await s.execute(
+                    select(Authorization.id, Authorization.auth_id)
+                    .where(
+                        Authorization.decision.is_(None),
+                        Authorization.deadline_at < func.now(),
+                    )
+                    .limit(100)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            for row_id, auth_id in rows:
+                await s.execute(
+                    update(Authorization)
+                    .where(Authorization.id == row_id, Authorization.decision.is_(None))
+                    .values(
+                        decision="declined",
+                        decline_reason=DeclineReason.TIMEOUT.value,
+                        decided_at=func.now(),
+                        response_body=render_response(
+                            auth_id, Decision.decline(DeclineReason.TIMEOUT)
+                        ),
+                        state=AuthState.DECLINED,
+                        compensation=case(
+                            (
+                                Authorization.authorize_attempted_at.is_not(None),
+                                Compensation.PENDING,
+                            ),
+                            else_=None,
+                        ),
+                    )
+                )
+        return len(rows)
 
     def _hold_key(self, owner: str, auth_id: str) -> Pubkey:
         pdas = self.chain.program.pdas

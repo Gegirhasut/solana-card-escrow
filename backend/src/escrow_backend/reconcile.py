@@ -169,17 +169,29 @@ async def reconcile(
             refund_keys[rid] = pdas.refund(
                 pdas.vault(Pubkey.from_string(owner)), refund_id_bytes(rid)
             )
-    exists = await chain.accounts_exist(list(refund_keys.values()))
+    chain_amounts = await chain.get_refund_amounts(list(refund_keys.values()))
     for rid in sorted(set(refund_ops) | set(issuer_refunds)):
         report.checked_refunds += 1
         op = refund_ops.get(rid)
         iss_r = issuer_refunds.get(rid)
-        on_chain = exists.get(refund_keys[rid], False) if rid in refund_keys else False
+        chain_amount = chain_amounts.get(refund_keys[rid]) if rid in refund_keys else None
+        on_chain = chain_amount is not None
         db_ok = op is not None and op.status == OpStatus.SUCCEEDED
         iss_ok = iss_r is not None and iss_r.get("status") == "succeeded"
         if db_ok != on_chain:
             report.add(
                 rid, "refund_chain_mismatch", f"db={op.status if op else None} on_chain={on_chain}"
+            )
+        amounts = {
+            "chain": chain_amount,
+            "backend": op.amount if db_ok and op else None,
+            "issuer": int(iss_r["amount"]) if iss_ok and iss_r else None,
+        }
+        if len({a for a in amounts.values() if a is not None}) > 1:
+            report.add(
+                rid,
+                "refund_amount_mismatch",
+                " ".join(f"{k}={v}" for k, v in amounts.items()),
             )
         if iss_r is not None and iss_ok != db_ok:
             report.add(
@@ -196,6 +208,8 @@ def _check_auth(
     key = db.auth_id
     if iss is not None and iss.decision is not None and iss.decision != db.decision:
         report.add(key, "decision_mismatch", f"issuer={iss.decision} backend={db.decision}")
+    if iss is not None and iss.amount is not None and iss.amount != db.amount:
+        report.add(key, "auth_amount_mismatch", f"issuer={iss.amount} backend={db.amount}")
 
     if db.decision == "approved":
         if hold is None:

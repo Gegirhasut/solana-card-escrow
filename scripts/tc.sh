@@ -4,7 +4,7 @@
 #   scripts/tc.sh anchor build
 #   scripts/tc.sh cargo test -p card-escrow
 #
-# Keypairs are mounted read-only from ~/.config/solana (never from the repo).
+# Keypairs are mounted from ~/.config/solana (never from the repo).
 # Cargo registry and target dir live in named volumes: the repo may sit on a
 # shared folder where cargo is slow and hard links are unsupported.
 set -euo pipefail

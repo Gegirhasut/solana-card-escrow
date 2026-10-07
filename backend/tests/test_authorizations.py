@@ -291,3 +291,35 @@ async def test_broken_redis_falls_back_to_polling(ctx: Ctx) -> None:
     assert len(set(bodies)) == 1
     assert json.loads(bodies[0])["decision"] == "approved"
     await broken.aclose()
+
+
+async def test_hung_redis_does_not_hold_up_the_answer(ctx: Ctx) -> None:
+    """A Redis that accepts connections but never answers (network partition)."""
+    from escrow_backend.services.authorizations import AuthorizationService
+    from escrow_backend.services.notify import Notifier
+
+    class HungPubSub:
+        async def subscribe(self, *_: object) -> None:
+            await asyncio.sleep(3600)
+
+        async def get_message(self, **_: object) -> None:
+            await asyncio.sleep(3600)
+
+        async def unsubscribe(self) -> None:
+            await asyncio.sleep(3600)
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(3600)
+
+    class HungRedis:
+        async def publish(self, *_: object) -> None:
+            await asyncio.sleep(3600)
+
+        def pubsub(self) -> HungPubSub:
+            return HungPubSub()
+
+    svc = AuthorizationService(ctx.sm, ctx.chain, Notifier(HungRedis()), 3000)  # type: ignore[arg-type]
+    req = AuthRequest("hung", CARD, USD, "USD")
+    bodies = await asyncio.wait_for(asyncio.gather(*[svc.handle(req) for _ in range(3)]), 10)
+    assert len(set(bodies)) == 1
+    assert json.loads(bodies[0])["decision"] == "approved"

@@ -487,7 +487,12 @@ impl Env {
         )
     }
 
-    pub fn ix_set_limits(&self, owner: &Pubkey, vault: &Pubkey, limits: VaultLimits) -> Instruction {
+    pub fn ix_set_limits(
+        &self,
+        owner: &Pubkey,
+        vault: &Pubkey,
+        limits: VaultLimits,
+    ) -> Instruction {
         Instruction::new_with_bytes(
             card_escrow::ID,
             &card_escrow::instruction::SetLimits { limits }.data(),
@@ -512,7 +517,11 @@ impl Env {
     ) -> Instruction {
         Instruction::new_with_bytes(
             card_escrow::ID,
-            &card_escrow::instruction::Authorize { auth_id: id, amount }.data(),
+            &card_escrow::instruction::Authorize {
+                auth_id: id,
+                amount,
+            }
+            .data(),
             card_escrow::accounts::Authorize {
                 operator: *operator,
                 payer: *operator,

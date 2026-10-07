@@ -10,7 +10,11 @@ Each webhook is keyed by `(kind, external_id)` (unique). Processing:
    once), so a retry after an ambiguous failure cannot double-move funds:
    "already done" errors are resolved by reading the on-chain state.
 4. Store a final response (succeeded / failed) that duplicates replay verbatim.
-   Transient failures go to `retry` for the worker; the issuer gets 202.
+   Only the current lease holder may write it (fenced by `attempts`), and at
+   most one clearing per authorization can succeed.
+   Transient failures go to `retry` with backoff; the issuer gets 202. An
+   ambiguous outcome is never turned into "failed": it is retried until the
+   chain gives a definite answer.
 """
 
 from __future__ import annotations
@@ -41,8 +45,10 @@ from escrow_backend.solana.program import HoldStatus
 
 log = structlog.get_logger(__name__)
 
-LEASE = timedelta(seconds=30)
-MAX_ATTEMPTS = 20
+# Longer than one execution (confirmation timeout + RPC round trips).
+LEASE = timedelta(seconds=90)
+RETRY_BASE_S = 5
+RETRY_MAX_S = 300
 
 
 @dataclass(frozen=True)
@@ -104,9 +110,12 @@ class OperationService:
         except _Permanent as e:
             return await self._finish(op, OpStatus.FAILED, None, error=e.reason)
         except ChainError as e:
-            if e.transient and op.attempts < MAX_ATTEMPTS:
+            if e.transient:
                 return await self._retry(op, str(e))
             return await self._finish(op, OpStatus.FAILED, None, error=e.name or str(e))
+        except Exception as e:  # unexpected (bad data, bugs): keep the op alive, retry later
+            log.exception("op.error", kind=op.kind, id=op.external_id)
+            return await self._retry(op, f"{type(e).__name__}: {e}")
         return await self._finish(op, OpStatus.SUCCEEDED, tx, **extra)
 
     # ------------------------------------------------------------- leasing
@@ -118,11 +127,7 @@ class OperationService:
                 .where(
                     IssuerOperation.kind == kind,
                     IssuerOperation.external_id == external_id,
-                    or_(
-                        IssuerOperation.status.in_([OpStatus.PENDING, OpStatus.RETRY]),
-                        (IssuerOperation.status == OpStatus.PROCESSING)
-                        & (IssuerOperation.lease_until < func.now()),
-                    ),
+                    _claimable(),
                 )
                 .values(
                     status=OpStatus.PROCESSING,
@@ -145,14 +150,30 @@ class OperationService:
             return OpResult(200, op.response_body)
         return OpResult(202, _body(kind, external_id, "processing"))
 
+    def _fenced(self, op: IssuerOperation):  # type: ignore[no-untyped-def]
+        """WHERE clause that only matches while `op` still holds its lease."""
+        return (
+            (IssuerOperation.id == op.id)
+            & (IssuerOperation.status == OpStatus.PROCESSING)
+            & (IssuerOperation.attempts == op.attempts)
+        )
+
     async def _retry(self, op: IssuerOperation, error: str) -> OpResult:
-        log.warning("op.retry", kind=op.kind, id=op.external_id, error=error)
+        backoff = min(RETRY_BASE_S * 2 ** (op.attempts - 1), RETRY_MAX_S)
+        log.warning("op.retry", kind=op.kind, id=op.external_id, error=error, backoff_s=backoff)
         async with transaction(self.sm) as s:
-            await s.execute(
+            # For RETRY rows `lease_until` is the earliest next attempt.
+            res = await s.execute(
                 update(IssuerOperation)
-                .where(IssuerOperation.id == op.id)
-                .values(status=OpStatus.RETRY, last_error=error, lease_until=None)
+                .where(self._fenced(op))
+                .values(
+                    status=OpStatus.RETRY,
+                    last_error=error,
+                    lease_until=func.now() + timedelta(seconds=backoff),
+                )
             )
+        if res.rowcount == 0:  # type: ignore[attr-defined]
+            return await self._current(op.kind, op.external_id)
         return OpResult(202, _body(op.kind, op.external_id, "processing"))
 
     async def _finish(
@@ -164,6 +185,32 @@ class OperationService:
         error: str | None = None,
         **extra: Any,
     ) -> OpResult:
+        async with transaction(self.sm) as s:
+            if (
+                status == OpStatus.SUCCEEDED
+                and op.kind == OpKind.CLEARING
+                and await self._other_clearing_succeeded(op, s, lock=True)
+            ):
+                # One hold, one capture: if a sibling clearing already reported
+                # success (it resolved our landed capture as its own), this one
+                # must not report the same money again.
+                status, tx, error, extra = OpStatus.FAILED, None, "hold_captured", {}
+            result = await self._finish_in(s, op, status, tx, error, extra)
+        if result is None:
+            # Our lease expired and another executor took over: its result wins.
+            log.warning("op.lease_lost", kind=op.kind, id=op.external_id)
+            return await self._current(op.kind, op.external_id)
+        return result
+
+    async def _finish_in(
+        self,
+        s: AsyncSession,
+        op: IssuerOperation,
+        status: OpStatus,
+        tx: TxResult | None,
+        error: str | None,
+        extra: dict[str, Any],
+    ) -> OpResult | None:
         body = _body(
             op.kind,
             op.external_id,
@@ -172,20 +219,21 @@ class OperationService:
             signature=tx.signature if tx else None,
             **extra,
         )
-        async with transaction(self.sm) as s:
-            await s.execute(
-                update(IssuerOperation)
-                .where(IssuerOperation.id == op.id)
-                .values(
-                    status=status,
-                    response_body=body,
-                    last_error=error,
-                    tx_sig=tx.signature if tx else None,
-                    lease_until=None,
-                )
+        res = await s.execute(
+            update(IssuerOperation)
+            .where(self._fenced(op))
+            .values(
+                status=status,
+                response_body=body,
+                last_error=error,
+                tx_sig=tx.signature if tx else None,
+                lease_until=None,
             )
-            if status == OpStatus.SUCCEEDED:
-                await self._apply_to_authorization(s, op, extra)
+        )
+        if res.rowcount == 0:  # type: ignore[attr-defined]
+            return None
+        if status == OpStatus.SUCCEEDED:
+            await self._apply_to_authorization(s, op, extra)
         log.info("op.finished", kind=op.kind, id=op.external_id, status=status, error=error)
         return OpResult(200, body)
 
@@ -220,6 +268,9 @@ class OperationService:
             auth = await s.scalar(select(Authorization).where(Authorization.auth_id == op.auth_id))
         if auth is None:
             raise _Permanent("unknown_authorization")
+        if auth.decision is None:
+            # The authorization is still being decided: retry, don't fail.
+            raise ChainError("authorization not decided yet", transient=True)
         if auth.decision != "approved" or auth.owner_pubkey is None:
             raise _Permanent("authorization_not_approved")
         return auth
@@ -239,7 +290,7 @@ class OperationService:
         if amount > auth.amount:
             raise _Permanent("capture_exceeds_authorization")
         try:
-            tx = await self.chain.capture(owner, aid, amount)
+            tx = await self.chain.capture(owner, aid, amount, memo=op.external_id)
         except ChainError as e:
             if e.name == "HoldNotPending":
                 status, captured = await self._hold_status(owner, aid)
@@ -249,6 +300,7 @@ class OperationService:
                     and op.attempts > 1
                     and not await self._other_clearing_succeeded(op)
                 ):
+                    # (_finish re-checks this under a lock on the authorization.)
                     # Our own earlier attempt landed but its outcome was lost
                     # (e.g. confirmation timeout): report success idempotently.
                     return None, {"captured_amount": captured}
@@ -258,16 +310,27 @@ class OperationService:
             raise
         return tx, {"captured_amount": amount}
 
-    async def _other_clearing_succeeded(self, op: IssuerOperation) -> bool:
-        async with self.sm() as s:
-            other = await s.scalar(
-                select(IssuerOperation.id).where(
-                    IssuerOperation.kind == OpKind.CLEARING,
-                    IssuerOperation.auth_id == op.auth_id,
-                    IssuerOperation.external_id != op.external_id,
-                    IssuerOperation.status == OpStatus.SUCCEEDED,
-                )
+    async def _other_clearing_succeeded(
+        self, op: IssuerOperation, s: AsyncSession | None = None, *, lock: bool = False
+    ) -> bool:
+        if s is None:
+            async with self.sm() as s2:
+                return await self._other_clearing_succeeded(op, s2)
+        if lock:
+            # Serializes concurrent clearing finishes for one authorization.
+            await s.execute(
+                select(Authorization.id)
+                .where(Authorization.auth_id == op.auth_id)
+                .with_for_update()
             )
+        other = await s.scalar(
+            select(IssuerOperation.id).where(
+                IssuerOperation.kind == OpKind.CLEARING,
+                IssuerOperation.auth_id == op.auth_id,
+                IssuerOperation.external_id != op.external_id,
+                IssuerOperation.status == OpStatus.SUCCEEDED,
+            )
+        )
         return other is not None
 
     async def _release(self, owner: Pubkey, aid: bytes) -> tuple[TxResult | None, dict[str, Any]]:
@@ -307,14 +370,17 @@ class OperationService:
         async with self.sm() as s:
             rows = await s.execute(
                 select(IssuerOperation.kind, IssuerOperation.external_id)
-                .where(
-                    or_(
-                        IssuerOperation.status.in_([OpStatus.RETRY, OpStatus.PENDING]),
-                        (IssuerOperation.status == OpStatus.PROCESSING)
-                        & (IssuerOperation.lease_until < func.now()),
-                    )
-                )
+                .where(_claimable())
                 .order_by(IssuerOperation.id)
                 .limit(limit)
             )
             return [(k, e) for k, e in rows.all()]
+
+
+def _claimable():  # type: ignore[no-untyped-def]
+    """New ops, retries whose backoff has passed, and processing ops whose lease expired."""
+    return or_(
+        IssuerOperation.status == OpStatus.PENDING,
+        (IssuerOperation.status.in_([OpStatus.RETRY, OpStatus.PROCESSING]))
+        & (func.coalesce(IssuerOperation.lease_until, func.now()) <= func.now()),
+    )

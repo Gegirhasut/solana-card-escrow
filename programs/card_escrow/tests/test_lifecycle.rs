@@ -43,7 +43,10 @@ fn open_vault_and_deposit() {
 
     let meta = assert_ok(env.send(&[env.ix_deposit(&user, 250 * USD)], &[&user.kp]));
     assert_eq!(env.balance(&user.vault_ata), 250 * USD);
-    assert_eq!(env.balance(&user.wallet_ata), INITIAL_USER_TOKENS - 250 * USD);
+    assert_eq!(
+        env.balance(&user.wallet_ata),
+        INITIAL_USER_TOKENS - 250 * USD
+    );
     let ev = &events::<Deposited>(&meta)[0];
     assert_eq!((ev.amount, ev.balance), (250 * USD, 250 * USD));
 }
@@ -86,7 +89,13 @@ fn withdraw_to_any_token_account_of_the_mint() {
     let mut env = Env::new();
     let user = take_user(&mut env);
     let other = env.new_user_with_tokens(0);
-    let ix = env.ix_withdraw_raw(&user.pubkey(), &user.vault, &user.vault_ata, &other.wallet_ata, USD);
+    let ix = env.ix_withdraw_raw(
+        &user.pubkey(),
+        &user.vault,
+        &user.vault_ata,
+        &other.wallet_ata,
+        USD,
+    );
     assert_ok(env.send(&[ix], &[&user.kp]));
     assert_eq!(env.balance(&other.wallet_ata), USD);
 }
@@ -106,7 +115,11 @@ fn set_limits_by_owner() {
     ));
     let v = env.vault(&user);
     assert_eq!(
-        (v.daily_limit, v.velocity_max_auths, v.velocity_window_seconds),
+        (
+            v.daily_limit,
+            v.velocity_max_auths,
+            v.velocity_window_seconds
+        ),
         (42 * USD, 2, 60)
     );
     assert_eq!(events::<LimitsUpdated>(&meta)[0].daily_limit, 42 * USD);
@@ -128,12 +141,18 @@ fn authorize_creates_pending_hold() {
     assert_eq!(h.rent_payer, env.operator.pubkey());
 
     let v = env.vault(&user);
-    assert_eq!((v.held_total, v.daily_spent, v.window_count), (120 * USD, 120 * USD, 1));
+    assert_eq!(
+        (v.held_total, v.daily_spent, v.window_count),
+        (120 * USD, 120 * USD, 1)
+    );
     // Funds are reserved, not moved.
     assert_eq!(env.balance(&user.vault_ata), INITIAL_DEPOSIT);
 
     let ev = &events::<HoldAuthorized>(&meta)[0];
-    assert_eq!((ev.amount, ev.held_total, ev.auth_id), (120 * USD, 120 * USD, id));
+    assert_eq!(
+        (ev.amount, ev.held_total, ev.auth_id),
+        (120 * USD, 120 * USD, id)
+    );
 }
 
 #[test]
@@ -145,11 +164,17 @@ fn full_capture_pays_settlement() {
     let meta = assert_ok(env.capture(&user, id, 100 * USD));
 
     let h = env.hold(&user, &id);
-    assert_eq!((h.status, h.captured_amount), (HoldStatus::Captured, 100 * USD));
+    assert_eq!(
+        (h.status, h.captured_amount),
+        (HoldStatus::Captured, 100 * USD)
+    );
     let v = env.vault(&user);
     assert_eq!((v.held_total, v.daily_spent), (0, 100 * USD));
     assert_eq!(env.balance(&user.vault_ata), INITIAL_DEPOSIT - 100 * USD);
-    assert_eq!(env.balance(&env.settlement_ata), SETTLEMENT_FLOAT + 100 * USD);
+    assert_eq!(
+        env.balance(&env.settlement_ata),
+        SETTLEMENT_FLOAT + 100 * USD
+    );
     let ev = &events::<HoldCaptured>(&meta)[0];
     assert_eq!((ev.captured_amount, ev.released_amount), (100 * USD, 0));
 }
@@ -164,13 +189,19 @@ fn partial_capture_releases_remainder() {
     let meta = assert_ok(env.capture(&user, id, 70 * USD));
 
     let h = env.hold(&user, &id);
-    assert_eq!((h.status, h.captured_amount), (HoldStatus::Captured, 70 * USD));
+    assert_eq!(
+        (h.status, h.captured_amount),
+        (HoldStatus::Captured, 70 * USD)
+    );
     let v = env.vault(&user);
     // Only the other hold is still reserved; the unused 30 return to the daily limit.
     assert_eq!((v.held_total, v.daily_spent), (50 * USD, 120 * USD));
     assert_eq!(env.balance(&user.vault_ata), INITIAL_DEPOSIT - 70 * USD);
     let ev = &events::<HoldCaptured>(&meta)[0];
-    assert_eq!((ev.captured_amount, ev.released_amount, ev.held_total), (70 * USD, 30 * USD, 50 * USD));
+    assert_eq!(
+        (ev.captured_amount, ev.released_amount, ev.held_total),
+        (70 * USD, 30 * USD, 50 * USD)
+    );
 }
 
 #[test]
@@ -216,9 +247,15 @@ fn refund_moves_funds_back_to_vault() {
     let rid = auth_id(900);
     let meta = assert_ok(env.refund(&user, rid, 40 * USD));
     assert_eq!(env.balance(&user.vault_ata), INITIAL_DEPOSIT - 60 * USD);
-    assert_eq!(env.balance(&env.settlement_ata), SETTLEMENT_FLOAT + 60 * USD);
+    assert_eq!(
+        env.balance(&env.settlement_ata),
+        SETTLEMENT_FLOAT + 60 * USD
+    );
     let r = env.refund_record(&user, &rid);
-    assert_eq!((r.vault, r.amount, r.refund_id, r.ts), (user.vault, 40 * USD, rid, START_TS));
+    assert_eq!(
+        (r.vault, r.amount, r.refund_id, r.ts),
+        (user.vault, 40 * USD, rid, START_TS)
+    );
     assert_eq!(events::<Refunded>(&meta)[0].amount, 40 * USD);
 }
 
@@ -285,7 +322,10 @@ fn update_config_rotates_roles_and_settlement() {
     assert_eq!(cfg.settlement_token_account, new_settlement);
     assert_eq!(cfg.default_hold_ttl_seconds, 3_600);
     assert_eq!(cfg.admin, admin.pubkey());
-    assert_eq!(events::<ConfigUpdated>(&meta)[0].operator, new_operator.pubkey());
+    assert_eq!(
+        events::<ConfigUpdated>(&meta)[0].operator,
+        new_operator.pubkey()
+    );
 
     // Admin hand-over.
     let new_admin = Keypair::new();
@@ -303,7 +343,10 @@ fn update_config_rotates_roles_and_settlement() {
         env.send(&[env.ix_set_paused(&admin.pubkey(), true)], &[&admin]),
         card_escrow::errors::EscrowError::Unauthorized,
     );
-    assert_ok(env.send(&[env.ix_set_paused(&new_admin.pubkey(), true)], &[&new_admin]));
+    assert_ok(env.send(
+        &[env.ix_set_paused(&new_admin.pubkey(), true)],
+        &[&new_admin],
+    ));
 }
 
 #[test]
@@ -341,7 +384,10 @@ fn many_holds_keep_held_total_consistent() {
         velocity_max_auths: u32::MAX,
         velocity_window_seconds: 60,
     };
-    assert_ok(env.send(&[env.ix_set_limits(&user.pubkey(), &user.vault, limits)], &[&user.kp]));
+    assert_ok(env.send(
+        &[env.ix_set_limits(&user.pubkey(), &user.vault, limits)],
+        &[&user.kp],
+    ));
     for n in 0..12u64 {
         assert_ok(env.authorize(&user, auth_id(n), (n + 1) * USD));
     }

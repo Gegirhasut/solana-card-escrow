@@ -125,6 +125,8 @@ def test_decode_token_and_clock() -> None:
         ("Allocate: account Address { .. } already in use", ACCOUNT_ALREADY_IN_USE),
         ("custom program error: 0x0", ACCOUNT_ALREADY_IN_USE),
         ("InstructionErrorCustom(Custom(0))", ACCOUNT_ALREADY_IN_USE),
+        ("Error Code: AccountNotInitialized. Error Number: 3012.", "AnchorError3012"),
+        ("custom program error: 0x1", "ProgramError1"),
         ("something else", None),
     ],
 )
@@ -155,4 +157,42 @@ async def test_already_processed_is_transient_and_drops_the_blockhash() -> None:
         await gw.authorize(PK[2], bytes(32), 1)
     assert e.value.transient and e.value.name is None
     assert gw._blockhash is None
+    await gw.close()
+
+
+async def test_capture_memo_makes_each_clearing_a_distinct_transaction() -> None:
+    from solders.transaction import Transaction
+
+    program = EscrowProgram(PK[0], PK[1])
+    gw = RpcGateway("http://127.0.0.1:1", program, Keypair(), None)
+    gw._blockhash = (Hash.new_unique(), float("inf"))
+    gw._settlement_ata = PK[3]
+    sent: list[Transaction] = []
+
+    async def send(tx: Transaction, **_: object) -> None:
+        sent.append(tx)
+        raise RPCException({"code": -1, "message": "stop here"})
+
+    gw.client.send_transaction = send  # type: ignore[method-assign]
+    for memo in ("c1", "c2"):
+        with pytest.raises(ChainError):
+            await gw.capture(PK[2], bytes(32), 5, memo=memo)
+    assert sent[0].signatures[0] != sent[1].signatures[0]
+    await gw.close()
+
+
+async def test_rotated_settlement_account_is_reread() -> None:
+    program = EscrowProgram(PK[0], PK[1])
+    gw = RpcGateway("http://127.0.0.1:1", program, Keypair(), None)
+    gw._blockhash = (Hash.new_unique(), float("inf"))
+    gw._settlement_ata = PK[3]
+
+    async def send(*_: object, **__: object) -> None:
+        raise RPCException({"code": -1, "message": "Error Number: 6016."})
+
+    gw.client.send_transaction = send  # type: ignore[method-assign]
+    with pytest.raises(ChainError) as e:
+        await gw.capture(PK[2], bytes(32), 5, memo="c1")
+    assert (e.value.name, e.value.transient) == ("InvalidSettlementAccount", True)
+    assert gw._settlement_ata is None
     await gw.close()

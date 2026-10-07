@@ -1,9 +1,12 @@
 """In-memory implementation of the card_escrow program rules.
 
-Used by unit tests and by the mock issuer's `--offline` mode. It enforces the
-same invariants as the on-chain program (PDA-init idempotency, held_total,
+Used by unit tests and by `ESCROW_CHAIN=memory`. It enforces the same
+invariants as the on-chain program (PDA-init idempotency, held_total,
 daily/velocity windows, capture/release/expire state machine) so service-level
-tests exercise realistic failure paths without a validator.
+tests exercise realistic failure paths without a validator. It does not model
+transport effects (signature deduplication, landed-but-unconfirmed
+transactions); those paths are covered by gateway unit tests and the
+integration tests.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ class InMemoryChain:
     settlement_balance: int = 0
     vaults: dict[Pubkey, _Vault] = field(default_factory=dict)
     holds: dict[Pubkey, Hold] = field(default_factory=dict)
-    refunds: set[Pubkey] = field(default_factory=set)
+    refunds: dict[Pubkey, int] = field(default_factory=dict)  # refund PDA -> amount
     sent: list[tuple[str, Pubkey, bytes, int]] = field(default_factory=list)
     fail_next: list[ChainError] = field(default_factory=list)
     _slot: itertools.count[int] = field(default_factory=lambda: itertools.count(1000))
@@ -126,6 +129,10 @@ class InMemoryChain:
         await self._io()
         return {k: k in self.holds or k in self.refunds for k in keys}
 
+    async def get_refund_amounts(self, keys: list[Pubkey]) -> dict[Pubkey, int | None]:
+        await self._io()
+        return {k: self.refunds.get(k) for k in keys}
+
     async def authorize(self, owner: Pubkey, auth_id: bytes, amount: int) -> TxResult:
         async with self._tx():
             if self.paused:
@@ -178,7 +185,7 @@ class InMemoryChain:
             )
             return self._ok("authorize", owner, auth_id, amount)
 
-    async def capture(self, owner: Pubkey, auth_id: bytes, amount: int) -> TxResult:
+    async def capture(self, owner: Pubkey, auth_id: bytes, amount: int, memo: str = "") -> TxResult:
         async with self._tx():
             if self.paused:
                 raise ChainError("paused", name="Paused")
@@ -224,7 +231,7 @@ class InMemoryChain:
                 raise ChainError("settlement balance too low", name=None)
             self.settlement_balance -= amount
             v.balance += amount
-            self.refunds.add(key)
+            self.refunds[key] = amount
             return self._ok("refund", owner, refund_id, amount)
 
     # ----------------------------------------------------------- helpers

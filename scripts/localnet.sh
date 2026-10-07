@@ -14,6 +14,12 @@ PROGRAM_ID=$(grep -oP 'declare_id!\("\K[^"]+' "$APP_DIR/programs/card_escrow/src
 case "${1:-start}" in
   start)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
+    if [ ! -f "$KEYS_DIR/card-escrow/deployer.json" ]; then
+      # First run: the deployer is the program's upgrade authority on localnet.
+      mkdir -p -m 700 "$KEYS_DIR/card-escrow"
+      docker run --rm --user "$(id -u):$(id -g)" -v "$KEYS_DIR:/keys" "$IMAGE" \
+        solana-keygen new --no-bip39-passphrase --silent -o /keys/card-escrow/deployer.json
+    fi
     DEPLOYER=$(docker run --rm -v "$KEYS_DIR:/root/.config/solana:ro" "$IMAGE" \
       solana-keygen pubkey /root/.config/solana/card-escrow/deployer.json)
     docker run -d --name "$NAME" --network host \

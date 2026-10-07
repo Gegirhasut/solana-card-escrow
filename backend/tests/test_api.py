@@ -129,6 +129,10 @@ async def test_every_webhook_requires_valid_signature(
         {**AUTH, "unexpected": 1},
         {k: v for k, v in AUTH.items() if k != "card_id"},
         "not an object",
+        {**AUTH, "amount": True},
+        {**AUTH, "amount": "100"},
+        {**AUTH, "amount": 100.0},
+        {**AUTH, "amount": 10**12 + 1},
     ],
 )
 async def test_invalid_payloads_rejected(
@@ -138,3 +142,36 @@ async def test_invalid_payloads_rejected(
     r = await post(c, "/webhooks/authorization", payload)
     assert r.status_code == 400
     assert chain.sent == []
+
+
+async def test_oversized_body_rejected_before_verification(
+    client: tuple[httpx.AsyncClient, InMemoryChain],
+) -> None:
+    c, chain = client
+    r = await c.post("/webhooks/authorization", content=b"x" * (64 * 1024 + 1))
+    assert r.status_code == 413
+    assert chain.sent == []
+
+
+async def test_refund_auth_id_is_validated(
+    client: tuple[httpx.AsyncClient, InMemoryChain],
+) -> None:
+    c, _ = client
+    payload = {"refund_id": "rf1", "card_id": CARD, "amount": 100, "auth_id": "x" * 200}
+    assert (await post(c, "/webhooks/refund", payload)).status_code == 400
+
+
+def test_rpc_mode_refuses_weak_secret_and_missing_mint(
+    test_settings: Callable[..., Settings],
+) -> None:
+    from pydantic import ValidationError
+
+    strong = "s" * 32
+    test_settings(chain="rpc", webhook_secret=strong)  # ok
+    for bad in ("dev-only-secret-change-me", "short", ""):
+        with pytest.raises(ValidationError, match="ESCROW_WEBHOOK_SECRET"):
+            test_settings(chain="rpc", webhook_secret=bad)
+    with pytest.raises(ValidationError, match="ESCROW_MINT"):
+        test_settings(chain="rpc", webhook_secret=strong, mint="")
+    with pytest.raises(ValidationError, match="mint_decimals"):
+        test_settings(mint_decimals=1)

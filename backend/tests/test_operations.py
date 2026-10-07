@@ -10,7 +10,7 @@ from solders.pubkey import Pubkey
 from sqlalchemy import select
 
 from escrow_backend.ids import auth_id_bytes
-from escrow_backend.models import Authorization, IssuerOperation, OpKind
+from escrow_backend.models import Authorization, IssuerOperation, OpKind, OpStatus
 from escrow_backend.services.operations import OpRequest, OpResult
 from escrow_backend.solana.gateway import ChainError, TxResult
 from escrow_backend.solana.program import HoldStatus
@@ -119,7 +119,7 @@ async def test_clearing_retry_after_landed_capture_is_idempotent(ctx: Ctx) -> No
     real = ctx.chain.capture
     calls = 0
 
-    async def capture(owner: Pubkey, auth_id: bytes, amount: int) -> TxResult:
+    async def capture(owner: Pubkey, auth_id: bytes, amount: int, memo: str = "") -> TxResult:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -140,7 +140,7 @@ async def test_clearing_retry_after_landed_capture_is_idempotent(ctx: Ctx) -> No
 async def test_permanent_chain_error_fails_operation(ctx: Ctx) -> None:
     await ctx.authorize("a1", 10 * USD)
 
-    async def capture(*a: Any) -> TxResult:
+    async def capture(*a: Any, **kw: Any) -> TxResult:
         raise ChainError("paused", name="Paused")
 
     ctx.chain.capture = capture  # type: ignore[method-assign]
@@ -148,20 +148,138 @@ async def test_permanent_chain_error_fails_operation(ctx: Ctx) -> None:
     assert (body(r)["status"], body(r)["error"]) == ("failed", "Paused")
 
 
-async def test_retry_gives_up_after_max_attempts(ctx: Ctx) -> None:
+async def test_ambiguous_outcome_is_never_turned_into_failure(ctx: Ctx) -> None:
+    """A long RPC outage keeps the clearing in retry; when the chain comes back
+    the clearing completes (here: the capture had landed during the outage)."""
+    await ctx.authorize("a1", 10 * USD)
+    real = ctx.chain.capture
+    landed = False
+
+    async def capture(owner: Pubkey, auth_id: bytes, amount: int, memo: str = "") -> TxResult:
+        nonlocal landed
+        if not landed:
+            landed = True
+            await real(owner, auth_id, amount)
+        raise ChainError("confirmation timeout", transient=True)
+
+    ctx.chain.capture = capture  # type: ignore[method-assign]
+    assert (await ctx.ops.handle(clearing("c1", "a1", USD))).status_code == 202
+    for _ in range(30):
+        await ctx.worker.retry_operations()
+    r = await ctx.ops.handle(clearing("c1", "a1", USD))
+    assert (r.status_code, body(r)["status"]) == (202, "processing")
+    ctx.chain.capture = real  # type: ignore[method-assign]
+    await ctx.worker.retry_operations()
+    r = await ctx.ops.handle(clearing("c1", "a1", USD))
+    assert (body(r)["status"], body(r)["captured_amount"]) == ("succeeded", USD)
+    assert ctx.chain.settlement_balance == 1_000_000 * USD + USD
+
+
+async def test_retry_backoff(ctx: Ctx, monkeypatch: Any) -> None:
     from escrow_backend.services import operations
 
+    monkeypatch.setattr(operations, "RETRY_BASE_S", 5)
     await ctx.authorize("a1", 10 * USD)
 
-    async def capture(*a: Any) -> TxResult:
+    async def capture(*a: Any, **kw: Any) -> TxResult:
         raise ChainError("rpc down", transient=True)
 
     ctx.chain.capture = capture  # type: ignore[method-assign]
     assert (await ctx.ops.handle(clearing("c1", "a1", USD))).status_code == 202
-    for _ in range(operations.MAX_ATTEMPTS):
-        await ctx.worker.retry_operations()
+    assert await ctx.worker.retry_operations() == 0  # not due for 5 s
+    r = await ctx.ops.handle(clearing("c1", "a1", USD))  # a redelivery waits too
+    assert (r.status_code, body(r)["status"]) == (202, "processing")
+
+
+async def test_clearing_before_authorization_is_decided_is_retried(ctx: Ctx) -> None:
+    from sqlalchemy import func
+
+    from escrow_backend.db import transaction
+
+    async with transaction(ctx.sm) as s:
+        s.add(
+            Authorization(
+                auth_id="a1",
+                card_id=CARD,
+                amount=10 * USD,
+                currency="USD",
+                deadline_at=func.now(),
+                state="pending",
+            )
+        )
     r = await ctx.ops.handle(clearing("c1", "a1", USD))
-    assert (body(r)["status"], body(r)["error"]) == ("failed", "rpc down")
+    assert (r.status_code, body(r)["status"]) == (202, "processing")
+
+
+async def test_stale_lease_holder_cannot_overwrite_result(ctx: Ctx) -> None:
+    """Executor A's lease expires mid-capture; B takes over and succeeds.
+    A's late failure must not replace B's answer."""
+    from datetime import timedelta
+
+    from sqlalchemy import func, update
+
+    from escrow_backend.db import transaction
+    from escrow_backend.services.operations import _Permanent
+
+    await ctx.authorize("a1", 10 * USD)
+    async with transaction(ctx.sm) as s:
+        s.add(
+            IssuerOperation(
+                kind=OpKind.CLEARING,
+                external_id="c1",
+                auth_id="a1",
+                amount=4 * USD,
+                request={},
+                status="pending",
+            )
+        )
+    a = await ctx.ops._claim(OpKind.CLEARING, "c1")
+    assert a is not None
+    async with transaction(ctx.sm) as s:
+        await s.execute(
+            update(IssuerOperation).values(lease_until=func.now() - timedelta(seconds=1))
+        )
+    b = await ctx.ops.process(OpKind.CLEARING, "c1")
+    assert body(b)["status"] == "succeeded"
+    late = await ctx.ops._finish(a, OpStatus.FAILED, None, error=_Permanent("x").reason)
+    assert late.body == b.body
+    assert body(await ctx.ops.handle(clearing("c1", "a1", 4 * USD)))["status"] == "succeeded"
+
+
+async def test_two_clearings_cannot_both_succeed_for_one_capture(ctx: Ctx) -> None:
+    """c1's capture lands but c1 is slow to confirm; c2 (same amount, already
+    retried once) resolves the landed capture as its own. When c1 finally
+    confirms, only one of them may report success."""
+    await ctx.authorize("a1", 10 * USD)
+    real = ctx.chain.capture
+    landed = asyncio.Event()
+    finish_c1 = asyncio.Event()
+    c2_calls = 0
+
+    async def capture(owner: Pubkey, auth_id: bytes, amount: int, memo: str = "") -> TxResult:
+        nonlocal c2_calls
+        if memo == "c1":
+            tx = await real(owner, auth_id, amount)
+            landed.set()
+            await finish_c1.wait()
+            return tx
+        c2_calls += 1
+        if c2_calls == 1:
+            raise ChainError("rpc down", transient=True)
+        return await real(owner, auth_id, amount)
+
+    ctx.chain.capture = capture  # type: ignore[method-assign]
+    assert (await ctx.ops.handle(clearing("c2", "a1", 5 * USD))).status_code == 202
+    c1 = asyncio.create_task(ctx.ops.handle(clearing("c1", "a1", 5 * USD)))
+    await landed.wait()
+    await ctx.worker.retry_operations()  # c2: HoldNotPending -> captured 5 == 5
+    finish_c1.set()
+    await c1
+    results = [
+        body(await ctx.ops.handle(clearing(c, "a1", 5 * USD)))["status"] for c in ("c1", "c2")
+    ]
+    assert sorted(results) == ["failed", "succeeded"]
+    assert ctx.chain.settlement_balance == 1_000_000 * USD + 5 * USD
 
 
 # -------------------------------------------------------------------- reversal

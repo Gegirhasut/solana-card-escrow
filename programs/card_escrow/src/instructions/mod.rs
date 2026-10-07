@@ -21,7 +21,9 @@ use crate::{constants::VAULT_SEED, errors::EscrowError, state::UserVault};
 
 /// Rejects Token-2022 mints whose extensions would break the escrow's
 /// accounting or custody assumptions (fees change transferred amounts, hooks
-/// run arbitrary code, a permanent delegate can drain vaults, etc.).
+/// run arbitrary code, a permanent delegate can drain vaults, pause or a
+/// frozen default state can block withdrawals, a close authority lets the mint
+/// be re-created with new extensions, etc.).
 pub(crate) fn assert_supported_mint(mint: &InterfaceAccount<Mint>) -> Result<()> {
     let info = mint.to_account_info();
     if *info.owner == anchor_spl::token::ID {
@@ -39,6 +41,9 @@ pub(crate) fn assert_supported_mint(mint: &InterfaceAccount<Mint>) -> Result<()>
                 | ExtensionType::ConfidentialTransferMint
                 | ExtensionType::ConfidentialTransferFeeConfig
                 | ExtensionType::ConfidentialMintBurn
+                | ExtensionType::Pausable
+                | ExtensionType::DefaultAccountState
+                | ExtensionType::MintCloseAuthority
         ) {
             return err!(EscrowError::UnsupportedMintExtension);
         }

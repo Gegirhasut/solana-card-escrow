@@ -15,6 +15,8 @@ from redis.asyncio import Redis
 log = structlog.get_logger(__name__)
 
 POLL_INTERVAL_S = 0.05
+# Redis must never hold up an answer: a hung server costs at most this much.
+REDIS_CALL_TIMEOUT_S = 0.5
 
 
 def channel(auth_id: str) -> str:
@@ -29,7 +31,8 @@ class Notifier:
         if self.redis is None:
             return
         try:
-            await self.redis.publish(channel(auth_id), "1")
+            async with asyncio.timeout(REDIS_CALL_TIMEOUT_S):
+                await self.redis.publish(channel(auth_id), "1")
         except Exception as e:  # never let notification failures affect decisions
             log.warning("notify.publish_failed", auth_id=auth_id, error=str(e))
 
@@ -40,7 +43,8 @@ class Notifier:
         if self.redis is not None:
             try:
                 pubsub = self.redis.pubsub()
-                await pubsub.subscribe(channel(auth_id))
+                async with asyncio.timeout(REDIS_CALL_TIMEOUT_S):
+                    await pubsub.subscribe(channel(auth_id))
             except Exception as e:
                 log.warning("notify.subscribe_failed", auth_id=auth_id, error=str(e))
                 pubsub = None
@@ -50,7 +54,10 @@ class Notifier:
                 await asyncio.sleep(POLL_INTERVAL_S)
                 return
             try:
-                await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_INTERVAL_S)
+                async with asyncio.timeout(POLL_INTERVAL_S * 2):
+                    await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=POLL_INTERVAL_S
+                    )
             except Exception:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
@@ -59,5 +66,6 @@ class Notifier:
         finally:
             if pubsub is not None:
                 with contextlib.suppress(Exception):
-                    await pubsub.unsubscribe()
-                    await pubsub.aclose()
+                    async with asyncio.timeout(REDIS_CALL_TIMEOUT_S):
+                        await pubsub.unsubscribe()
+                        await pubsub.aclose()

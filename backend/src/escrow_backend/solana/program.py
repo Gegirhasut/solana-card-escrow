@@ -218,6 +218,13 @@ class Hold:
         )
 
 
+def decode_refund_amount(data: bytes) -> int:
+    """`Refund` account: discriminator, vault (32), refund_id (32), amount (u64), ..."""
+    if data[:8] != account_disc("Refund"):
+        raise ValueError("not a Refund account")
+    return int(struct.unpack_from("<Q", data, 8 + 32 + 32)[0])
+
+
 def decode_token_amount(data: bytes) -> int:
     """SPL Token / Token-2022 account: amount is a u64 at offset 64."""
     (amount,) = struct.unpack_from("<Q", data, 64)
