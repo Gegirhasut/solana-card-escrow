@@ -20,6 +20,17 @@ use instructions::*;
 
 declare_id!("8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK");
 
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "card-escrow",
+    project_url: "https://github.com/Gegirhasut/solana-card-escrow",
+    contacts: "email:gegirhasut@gmail.com,link:https://github.com/Gegirhasut/solana-card-escrow/security/advisories/new",
+    policy: "https://github.com/Gegirhasut/solana-card-escrow/blob/main/SECURITY.md",
+    preferred_languages: "en,ru",
+    source_code: "https://github.com/Gegirhasut/solana-card-escrow",
+    auditors: "None"
+}
+
 #[program]
 pub mod card_escrow {
     use super::*;
