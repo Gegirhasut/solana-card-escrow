@@ -4,7 +4,7 @@
 
 All keypairs are read from / written to ~/.config/solana/card-escrow (outside the
 repository). On mainnet use `--mint` with the real USDC mint; the script then
-never mints tokens and skips the demo users unless `--users` is given.
+never mints tokens; add `--no-users` to skip the demo vaults.
 """
 
 from __future__ import annotations

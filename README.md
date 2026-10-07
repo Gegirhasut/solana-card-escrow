@@ -13,7 +13,9 @@ issuer integration (authorization, clearing, reversal and refund webhooks).
 |---|---|
 | Program ID | `8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK` |
 | Devnet | deployed — [explorer](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet); mock-issuer E2E + reconciliation run against it |
-| Mainnet | not deployed |
+| Mainnet | not deployed; ready (verifiable build, security.txt, checklist below) |
+| Verifiable build | on-chain hash `ec365992…c68d` = `solana-verify build` of this repo (Agave 3.1.14 image) |
+| security.txt | embedded; contact gegirhasut@gmail.com, see [SECURITY.md](SECURITY.md) |
 | Program tests | 66 passing (14 unit, 18 lifecycle, 34 security; LiteSVM against the SBF binary) |
 | Backend tests | 98 passing (92 unit/service + 6 chain integration on devnet) |
 <!-- STATUS:END -->
@@ -294,7 +296,8 @@ anything beyond a demo.
 | | |
 |---|---|
 | Program | [`8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK`](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet) |
-| ProgramData | `5pAGGdZUMWY6LxguFrotqAUPipkTRMUXPWzP9AbkUxYk` (415 280 bytes, slot 508400601) |
+| ProgramData | `5pAGGdZUMWY6LxguFrotqAUPipkTRMUXPWzP9AbkUxYk` (425 520 bytes, upgraded in slot 508453950) |
+| Executable hash | `ec365992e955dc609c9461766a0bbf6e29aca232b77eca85a71a318bc07dc68d` |
 | Upgrade authority | `7y5DrhLP9cBTUg4bLkQb35bxndyTY6K3FSGNTPYt2PyJ` |
 | Config PDA | `4i9JsD6ynYg6ik2c3LHGcKWhcczRTcpizqUppCdhoGBb` |
 | Test mint (6 decimals, not USDC) | `8MoGqRKufpjLVh9CupJabohLu7FTdAcFK7YaWQRdFFdy` |
@@ -312,13 +315,42 @@ export ESCROW_RPC_URL=https://api.devnet.solana.com \
 # then step 4 above with the devnet bootstrap file and `mock-issuer --auth-timeout 10`
 ```
 
+### Verifying the binary
+
+`scripts/build.sh` and `solana-verify build` produce the same bytes, so anyone
+can check that the deployed program is this source:
+
+```bash
+solana-verify build --library-name card_escrow        # Docker image picked from [workspace.metadata.cli]
+solana-verify get-executable-hash target/deploy/card_escrow.so
+solana-verify get-program-hash -u devnet 8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK
+```
+
+On devnet both print `ec365992…c68d`. Solana Explorer still shows *Program Not
+Verified* there: the OtterSec verification service that sets that badge only
+accepts mainnet programs. On mainnet the badge comes from the last step of the
+checklist below.
+
 ### Mainnet
 
-Not deployed: it needs explicit sign-off and real SOL. The ProgramData account
-for the 415 KB binary holds 2.11 SOL of rent on devnet, and mainnet rent is the
-same. A deploy also needs a buffer of the same size for a while, which is
-refunded afterwards. Build with `solana-verify` so the binary can be checked, and
-run `bootstrap --mint <USDC>` so no test tokens are minted.
+Not deployed: it needs explicit sign-off and real SOL. Checklist:
+
+1. **Keys.** A dedicated upgrade authority, ideally a multisig (e.g. Squads),
+   plus separate operator and settlement-authority keys. Never reuse the devnet
+   keys.
+2. **Rent.** About 2.9 SOL for a fresh deploy of the 416 KB binary
+   (ProgramData rent plus a buffer of the same size while uploading; the buffer
+   is refunded). Later upgrades that grow the binary must extend ProgramData
+   by at least 10 240 bytes (`solana program extend`), which is a loader rule.
+3. **Deploy** the `solana-verify build` output from a tagged commit, with a
+   priority fee and a dedicated RPC.
+4. **Verify**:
+   `solana-verify verify-from-repo -u mainnet --program-id <id> --library-name card_escrow https://github.com/Gegirhasut/solana-card-escrow --commit-hash <tag>`,
+   accept the on-chain verification PDA upload, then
+   `solana-verify remote submit-job --program-id <id> --uploader <authority>`.
+5. **Bootstrap** with the real mint: `bootstrap --mint EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --no-users`.
+6. **Backend** on a dedicated RPC with the default timings, the webhook secret
+   from the issuer, and Postgres and Redis that are backed up.
 
 ## Repository layout
 
@@ -329,6 +361,7 @@ programs/card_escrow/      Anchor program
   tests/                   LiteSVM integration tests against the SBF binary
 backend/                   FastAPI service, Alembic migrations, mock issuer
 docker/toolchain.Dockerfile  pinned Solana/Anchor toolchain
+SECURITY.md                vulnerability reporting (also embedded as security.txt)
 scripts/                   tc.sh (run in toolchain), localnet.sh
 idl/                       generated IDL
 ```

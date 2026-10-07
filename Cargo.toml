@@ -7,6 +7,10 @@ edition = "2021"
 rust-version = "1.89"
 license = "MIT"
 
+# Toolchain the verifiable build image is picked by (`solana-verify build`).
+[workspace.metadata.cli]
+solana = "3.1.14"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
