@@ -55,6 +55,7 @@ class IssuerView:
     amount: int | None = None
     cleared: int = 0
     reversed: bool = False
+    clearing_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -108,7 +109,11 @@ def load_issuer_ledger(
             v = auths[e["auth_id"]]
             v.decision, v.amount = e["decision"], e["amount"]
         elif t == "clearing" and e.get("status") == "succeeded":
-            auths[e["auth_id"]].cleared += int(e["amount"])
+            # A clearing re-sent by the issuer is still one clearing.
+            v = auths[e["auth_id"]]
+            if e["clearing_id"] not in v.clearing_ids:
+                v.clearing_ids.add(e["clearing_id"])
+                v.cleared += int(e["amount"])
         elif t == "reversal" and e.get("status") == "succeeded":
             auths[e["auth_id"]].reversed = True
         elif t == "refund":

@@ -14,9 +14,12 @@ import asyncio
 import json
 import os
 import struct
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
+from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from solana.rpc.models import TxOpts
@@ -38,6 +41,8 @@ KEYS = Path(os.environ.get("CARD_ESCROW_KEYS", "~/.config/solana/card-escrow")).
 DECIMALS = 6
 UNIT = 10**DECIMALS
 MINT_SIZE = 82
+RPC_ATTEMPTS = 8
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -106,20 +111,38 @@ class Bootstrapper:
         self.client = client
         self.deployer = deployer
 
+    async def rpc(self, call: Callable[[], Awaitable[T]]) -> T:
+        """Retries transport errors (public RPCs answer 429 under load)."""
+        for attempt in range(RPC_ATTEMPTS):
+            try:
+                return await call()
+            except SolanaRpcException:
+                if attempt == RPC_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(min(2**attempt, 15))
+        raise AssertionError("unreachable")
+
     async def send(self, ixs: list[Instruction], signers: list[Keypair]) -> str:
-        bh = (await self.client.get_latest_blockhash(Confirmed)).value.blockhash
+        bh = (await self.rpc(lambda: self.client.get_latest_blockhash(Confirmed))).value.blockhash
         tx = Transaction.new_signed_with_payer(ixs, signers[0].pubkey(), signers, bh)
+        # Resending the same signed tx is safe: the cluster deduplicates by signature.
         sig = (
-            await self.client.send_transaction(tx, opts=TxOpts(preflight_commitment=Confirmed))
+            await self.rpc(
+                lambda: self.client.send_transaction(
+                    tx, opts=TxOpts(preflight_commitment=Confirmed)
+                )
+            )
         ).value
-        await self.client.confirm_transaction(sig, Confirmed, sleep_seconds=0.5)
+        await self.rpc(lambda: self.client.confirm_transaction(sig, Confirmed, sleep_seconds=2))
         return str(sig)
 
     async def exists(self, pk: Pubkey) -> bool:
-        return (await self.client.get_account_info(pk, Confirmed)).value is not None
+        return (
+            await self.rpc(lambda: self.client.get_account_info(pk, Confirmed))
+        ).value is not None
 
     async def ensure_sol(self, pk: Pubkey, lamports: int) -> None:
-        bal = (await self.client.get_balance(pk, Confirmed)).value
+        bal = (await self.rpc(lambda: self.client.get_balance(pk, Confirmed))).value
         if bal < lamports:
             await self.send(
                 [

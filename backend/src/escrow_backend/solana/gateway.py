@@ -106,6 +106,7 @@ class RpcGateway:
         settlement_authority: Keypair | None,
         *,
         confirm_timeout_s: float = 30.0,
+        confirm_poll_s: float = 0.15,
         compute_unit_price: int = 0,
         compute_unit_limit: int = 0,
     ) -> None:
@@ -114,6 +115,7 @@ class RpcGateway:
         self.operator = operator
         self.settlement_authority = settlement_authority
         self.confirm_timeout_s = confirm_timeout_s
+        self.confirm_poll_s = confirm_poll_s
         self.compute_unit_price = compute_unit_price
         self.compute_unit_limit = compute_unit_limit
         self._blockhash: tuple[Hash, float] | None = None
@@ -233,6 +235,11 @@ class RpcGateway:
             )
         except RPCException as e:
             text = str(e)
+            if "already been processed" in text:
+                # Byte-identical resend (same blockhash) of a transaction that
+                # already landed: confirm the original instead of failing.
+                sig = tx.signatures[0]
+                return TxResult(str(sig), await self._confirm(sig))
             name = parse_program_error(text)
             if "Blockhash not found" in text:
                 self._blockhash = None
@@ -246,8 +253,15 @@ class RpcGateway:
 
     async def _confirm(self, sig: Signature) -> int:
         deadline = time.monotonic() + self.confirm_timeout_s
+        delay = self.confirm_poll_s
         while time.monotonic() < deadline:
-            resp = await self.client.get_signature_statuses([sig])
+            try:
+                resp = await self.client.get_signature_statuses([sig])
+            except Exception as e:  # RPC hiccup or rate limit: keep polling until the deadline
+                log.warning("confirm_poll_failed", signature=str(sig), error=str(e))
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+                continue
             status = resp.value[0]
             if status is not None:
                 if status.err is not None:
@@ -257,5 +271,5 @@ class RpcGateway:
                     status.confirmation_status
                 ).lower().endswith(("confirmed", "finalized")):
                     return int(status.slot)
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(self.confirm_poll_s)
         raise ChainError(f"confirmation timeout for {sig}", transient=True)

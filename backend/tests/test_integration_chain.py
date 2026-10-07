@@ -76,8 +76,13 @@ async def test_authorize_capture_flow(gw: tuple[RpcGateway, Pubkey]) -> None:
     after = await g.snapshot(alice)
     assert after.vault.held_total == before.vault.held_total + 3 * USD  # type: ignore[union-attr]
 
+    # A byte-identical resend (cached blockhash) confirms the original transaction.
+    again = await g.authorize(alice, auth_id_bytes(a), 3 * USD)
+    assert again.signature == tx.signature
+
+    # A different transaction for the same auth_id hits the Hold PDA `init`.
     with pytest.raises(ChainError) as dup:
-        await g.authorize(alice, auth_id_bytes(a), 3 * USD)
+        await g.authorize(alice, auth_id_bytes(a), 3 * USD + 1)
     assert dup.value.name == ACCOUNT_ALREADY_IN_USE
 
     with pytest.raises(ChainError) as over:
@@ -105,7 +110,7 @@ async def test_release_and_refund(gw: tuple[RpcGateway, Pubkey]) -> None:
     await g.refund(alice, refund_id_bytes(r), USD // 2)
     assert (await g.snapshot(alice)).balance == before + USD // 2
     with pytest.raises(ChainError) as dup:
-        await g.refund(alice, refund_id_bytes(r), USD // 2)
+        await g.refund(alice, refund_id_bytes(r), USD // 2 + 1)
     assert dup.value.name == ACCOUNT_ALREADY_IN_USE
     key = g.program.pdas.refund(g.program.pdas.vault(alice), refund_id_bytes(r))
     assert (await g.accounts_exist([key]))[key]

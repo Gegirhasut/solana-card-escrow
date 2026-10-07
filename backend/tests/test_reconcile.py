@@ -59,6 +59,13 @@ async def test_consistent_history_reconciles(ctx: Ctx, tmp_path: Path) -> None:
     assert "mismatches:             0" in report.render()
 
 
+async def test_redelivered_clearing_counts_once(ctx: Ctx, tmp_path: Path) -> None:
+    events = await scenario(ctx)
+    events.insert(2, events[1])  # the issuer logged a second delivery of c1
+    report = await reconcile(ctx.sm, ctx.chain, write_ledger(tmp_path / "l.jsonl", events))
+    assert report.ok, report.render()
+
+
 async def test_detects_every_mismatch_kind(ctx: Ctx, tmp_path: Path) -> None:
     events = await scenario(ctx)
     events[1]["amount"] = 61 * USD  # issuer thinks it cleared more

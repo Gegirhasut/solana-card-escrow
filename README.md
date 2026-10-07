@@ -12,10 +12,10 @@ issuer integration (authorization, clearing, reversal and refund webhooks).
 | | |
 |---|---|
 | Program ID | `8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK` |
-| Devnet | _pending_ |
-| Mainnet | _pending_ |
-| Program tests | _pending_ |
-| Backend tests | _pending_ |
+| Devnet | deployed — [explorer](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet); mock-issuer E2E + reconciliation run against it |
+| Mainnet | not deployed |
+| Program tests | 66 passing (14 unit, 18 lifecycle, 34 security; LiteSVM against the SBF binary) |
+| Backend tests | 98 passing (92 unit/service + 6 chain integration on devnet) |
 <!-- STATUS:END -->
 
 ---
@@ -238,11 +238,87 @@ uv run escrow-backend reconcile --ledger ledger.jsonl
 
 ## Test coverage
 
-_pending_
+**Program** (`scripts/tc.sh cargo test -p card-escrow`, 66 tests)
+
+- `src/state.rs` — 14 native unit tests of the money logic: reservation
+  against the available balance, daily-limit and velocity-window rollover,
+  zero limits freezing the card, capture/release/expire rules, TTL bounds,
+  overflow.
+- `tests/test_lifecycle.rs` — 18 LiteSVM tests that load the built
+  `card_escrow.so`: config init and role rotation, open vault / deposit /
+  withdraw, limits, authorize → full and partial capture, release, expiry by
+  anyone after the TTL, refund, closing holds, pause, a full Token-2022 card
+  lifecycle.
+- `tests/test_security.rs` — 34 negative tests: replayed auth and refund ids,
+  capture above the hold or after expiry, early expiry, withdrawing held
+  funds, limit boundaries, pause, every instruction with the wrong role
+  (admin / operator / owner / upgrade authority), foreign vault and hold
+  combinations, wrong mints, Token-2022 mints with a permanent delegate,
+  `u64::MAX` amounts.
+
+**Backend** (`uv run pytest --cov`, 98 tests, 75 % line+branch coverage)
+
+| Area | Tests | Coverage |
+|---|---|---|
+| Authorization decisions, idempotency, timeout budget | `test_authorizations.py`, `test_decision.py` | 98–100 % |
+| Clearing / reversal / refund operations | `test_operations.py` | 97 % |
+| Worker (retries, expiry crank, orphan-hold compensation) | `test_worker.py` | 85 % |
+| Three-way reconciliation | `test_reconcile.py` | 95 % |
+| Webhook HMAC, API | `test_webhook_auth.py`, `test_api.py` | 90–100 % |
+| Instruction encoding / account decoding | `test_program_client.py` | 100 % |
+| `RpcGateway` against a real cluster | `test_integration_chain.py` (`-m integration`) | 92 % |
+
+The uncovered remainder is operator tooling exercised by hand rather than by
+pytest: `bootstrap.py`, `cli.py` and the `mock-issuer` itself.
+
+**End to end on devnet.** The mock issuer runs 11 flows (full and partial
+capture, reversal, refund with a duplicate delivery, sequential and concurrent
+duplicate authorizations and clearings, insufficient funds, daily limit, a hold
+left to expire, a forged signature, a clearing for an unknown authorization).
+`escrow-backend reconcile` then compares the issuer ledger, the DB and the chain.
+After two full runs: 30 authorizations and 3 refunds checked, 0 mismatches.
+
+On the public devnet RPC (`api.devnet.solana.com`) an authorization
+occasionally misses its budget because `getSignatureStatuses` is rate-limited
+(HTTP 429). That is the designed failure mode, and the run shows it working:
+the backend declines (fail-closed), the hold lands on chain a moment later, the
+worker releases it as an orphan (`worker.orphan_hold_released`), and
+reconciliation stays clean. In the last full run this hit the `reversal`
+flow (10/11 passed); run on its own, that flow passes. Use a dedicated RPC for
+anything beyond a demo.
 
 ## Deployments
 
-_pending_
+### Devnet
+
+| | |
+|---|---|
+| Program | [`8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK`](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet) |
+| ProgramData | `5pAGGdZUMWY6LxguFrotqAUPipkTRMUXPWzP9AbkUxYk` (415 280 bytes, slot 508400601) |
+| Upgrade authority | `7y5DrhLP9cBTUg4bLkQb35bxndyTY6K3FSGNTPYt2PyJ` |
+| Config PDA | `4i9JsD6ynYg6ik2c3LHGcKWhcczRTcpizqUppCdhoGBb` |
+| Test mint (6 decimals, not USDC) | `8MoGqRKufpjLVh9CupJabohLu7FTdAcFK7YaWQRdFFdy` |
+| Demo vault: alice (1 000 tokens, 500/day) | owner `9XhsAuVUioZpC3N9PX1PqkCjfRdWApeycvn4fybb7wdz`, vault `6uQrE3scwEC8ps9RnUj12ke3im6xD48GmKhpYL9F44MT` |
+| Demo vault: bob (50 tokens, 10/day) | owner `3P3ZxMMECo85uhUVMezoguahpkdJUZXZdmmQPHbAYHvL`, vault `9ppmvWmexbG6TQu3YKQQzxigNJBuEfyUPsSuN6HsviFm` |
+
+Reproduce against devnet (the public RPC is rate-limited, so poll and decide
+more slowly than on localnet):
+
+```bash
+uv run escrow-backend bootstrap --cluster devnet --rpc-url https://api.devnet.solana.com \
+  --out ~/.config/solana/card-escrow/devnet/bootstrap.json
+export ESCROW_RPC_URL=https://api.devnet.solana.com \
+       ESCROW_AUTH_TIMEOUT_BUDGET_MS=8000 ESCROW_CONFIRM_POLL_S=0.8 ESCROW_WORKER_INTERVAL_S=15
+# then step 4 above with the devnet bootstrap file and `mock-issuer --auth-timeout 10`
+```
+
+### Mainnet
+
+Not deployed: it needs explicit sign-off and real SOL. The ProgramData account
+for the 415 KB binary holds 2.11 SOL of rent on devnet, and mainnet rent is the
+same. A deploy also needs a buffer of the same size for a while, which is
+refunded afterwards. Build with `solana-verify` so the binary can be checked, and
+run `bootstrap --mint <USDC>` so no test tokens are minted.
 
 ## Repository layout
 

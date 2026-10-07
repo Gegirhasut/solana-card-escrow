@@ -40,6 +40,8 @@ class Settings(BaseSettings):
         "~/.config/solana/card-escrow/settlement-authority.json"
     )
     confirm_timeout_s: float = 30.0
+    # Signature-status polling interval; raise it on rate-limited public RPCs.
+    confirm_poll_s: float = 0.15
     compute_unit_price: int = 0
     compute_unit_limit: int = 0
 

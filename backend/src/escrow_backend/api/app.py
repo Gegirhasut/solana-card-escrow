@@ -72,6 +72,7 @@ def build_chain(settings: Settings) -> ChainGateway:
         load_keypair(settings.operator_keypair),
         sa,
         confirm_timeout_s=settings.confirm_timeout_s,
+        confirm_poll_s=settings.confirm_poll_s,
         compute_unit_price=settings.compute_unit_price,
         compute_unit_limit=settings.compute_unit_limit,
     )
