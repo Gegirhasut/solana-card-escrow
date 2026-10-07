@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  program:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build toolchain image
+        run: docker build -t card-escrow-toolchain:1 -f docker/toolchain.Dockerfile docker
+      - name: Unit tests (native)
+        run: scripts/tc.sh cargo test -p card-escrow --lib
+      - name: Build program (SBPF v0, platform-tools v1.52)
+        run: scripts/build.sh
+      - name: LiteSVM tests
+        run: scripts/tc.sh cargo test -p card-escrow --tests
+      - name: Clippy
+        run: scripts/tc.sh cargo clippy -p card-escrow --all-targets -- -D warnings
+
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: escrow
+          POSTGRES_PASSWORD: escrow
+          POSTGRES_DB: escrow
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U escrow" --health-interval 2s --health-retries 30
+      redis:
+        image: redis:7
+        ports: ["6391:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --python 3.12
+      - run: uv run ruff check src tests && uv run ruff format --check src tests
+      - run: uv run pytest --cov --cov-report=term
