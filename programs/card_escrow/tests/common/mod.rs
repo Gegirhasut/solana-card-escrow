@@ -1,8 +1,10 @@
 //! Shared LiteSVM harness for card_escrow integration tests.
 //!
 //! The tests run the real SBF binary (`target/deploy/card_escrow.so`), so build
-//! it first with `anchor build` (or `scripts/test-program.sh`).
+//! it first with `anchor build` (or `scripts/build.sh`).
 #![allow(dead_code)]
+// TxResult carries LiteSVM's FailedTransactionMetadata (logs included) on purpose.
+#![allow(clippy::result_large_err)]
 
 use anchor_lang::{
     prelude::Pubkey, solana_program::instruction::Instruction, system_program, AccountDeserialize,
