@@ -4,7 +4,7 @@
 
 All keypairs are read from / written to ~/.config/solana/card-escrow (outside the
 repository). On mainnet use `--mint` with the real USDC mint; the script then
-never mints tokens; add `--no-users` to skip the demo vaults.
+never mints tokens and skips the demo users unless `--users` is given.
 """
 
 from __future__ import annotations
@@ -160,7 +160,9 @@ class Bootstrapper:
     async def create_mint(self, mint: Keypair) -> None:
         if await self.exists(mint.pubkey()):
             return
-        rent = (await self.client.get_minimum_balance_for_rent_exemption(MINT_SIZE)).value
+        rent = (
+            await self.rpc(lambda: self.client.get_minimum_balance_for_rent_exemption(MINT_SIZE))
+        ).value
         await self.send(
             [
                 create_account(
@@ -225,7 +227,7 @@ async def bootstrap(args: argparse.Namespace) -> dict[str, str]:
             print(f"config exists: {program.pdas.config()}")
 
         cards: dict[str, str] = {}
-        users = DEMO_USERS if args.users else []
+        users = DEMO_USERS if (test_mint if args.users is None else args.users) else []
         for u in users:
             kp = load_or_create(cluster_dir / "users" / f"{u.name}.json")
             owner = kp.pubkey()
@@ -260,7 +262,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mint", help="existing mint (e.g. USDC); omit to create a test mint")
     p.add_argument("--ttl", type=int, default=7 * 86_400, help="default hold TTL (s)")
     p.add_argument("--operator-sol", type=float, default=0.5)
-    p.add_argument("--users", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--users",
+        action=argparse.BooleanOptionalAction,
+        help="create demo users (default: only with a test mint)",
+    )
     p.add_argument("--out", type=Path, help="write resulting values as JSON")
     args = p.parse_args(argv)
     result = asyncio.run(bootstrap(args))

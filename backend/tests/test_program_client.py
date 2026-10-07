@@ -6,9 +6,17 @@ import struct
 from pathlib import Path
 
 import pytest
+from solana.rpc.core import RPCException
+from solders.hash import Hash
+from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from escrow_backend.solana.gateway import ACCOUNT_ALREADY_IN_USE, parse_program_error
+from escrow_backend.solana.gateway import (
+    ACCOUNT_ALREADY_IN_USE,
+    ChainError,
+    RpcGateway,
+    parse_program_error,
+)
 from escrow_backend.solana.program import (
     Config,
     EscrowProgram,
@@ -128,3 +136,23 @@ def test_error_name_bounds() -> None:
     assert error_name(6000) == "Unauthorized"
     assert error_name(5999) is None
     assert error_name(7000) is None
+
+
+async def test_already_processed_is_transient_and_drops_the_blockhash() -> None:
+    """Identical bytes may belong to another operation (same capture amount):
+    never report its signature as ours; retry with a fresh blockhash instead."""
+    program = EscrowProgram(PK[0], PK[1])
+    gw = RpcGateway("http://127.0.0.1:1", program, Keypair(), None)
+
+    async def already_processed(*_: object, **__: object) -> None:
+        raise RPCException(
+            {"code": -32002, "message": "This transaction has already been processed"}
+        )
+
+    gw._blockhash = (Hash.new_unique(), float("inf"))
+    gw.client.send_transaction = already_processed  # type: ignore[method-assign]
+    with pytest.raises(ChainError) as e:
+        await gw.authorize(PK[2], bytes(32), 1)
+    assert e.value.transient and e.value.name is None
+    assert gw._blockhash is None
+    await gw.close()

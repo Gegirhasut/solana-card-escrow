@@ -76,13 +76,14 @@ async def test_authorize_capture_flow(gw: tuple[RpcGateway, Pubkey]) -> None:
     after = await g.snapshot(alice)
     assert after.vault.held_total == before.vault.held_total + 3 * USD  # type: ignore[union-attr]
 
-    # A byte-identical resend (cached blockhash) confirms the original transaction.
-    again = await g.authorize(alice, auth_id_bytes(a), 3 * USD)
-    assert again.signature == tx.signature
-
-    # A different transaction for the same auth_id hits the Hold PDA `init`.
+    # A repeat with the cached blockhash is byte-identical ("already processed",
+    # transient); once the blockhash is dropped it hits the Hold PDA `init`.
     with pytest.raises(ChainError) as dup:
-        await g.authorize(alice, auth_id_bytes(a), 3 * USD + 1)
+        await g.authorize(alice, auth_id_bytes(a), 3 * USD)
+    if dup.value.name is None:
+        assert dup.value.transient
+        with pytest.raises(ChainError) as dup:
+            await g.authorize(alice, auth_id_bytes(a), 3 * USD)
     assert dup.value.name == ACCOUNT_ALREADY_IN_USE
 
     with pytest.raises(ChainError) as over:

@@ -235,13 +235,12 @@ class RpcGateway:
             )
         except RPCException as e:
             text = str(e)
-            if "already been processed" in text:
-                # Byte-identical resend (same blockhash) of a transaction that
-                # already landed: confirm the original instead of failing.
-                sig = tx.signatures[0]
-                return TxResult(str(sig), await self._confirm(sig))
             name = parse_program_error(text)
-            if "Blockhash not found" in text:
+            if "Blockhash not found" in text or "already been processed" in text:
+                # "Already processed": a different logical operation built the
+                # same bytes from the cached blockhash (e.g. two clearings of
+                # one hold for the same amount). It is not ours to claim:
+                # retry with a fresh blockhash and let the program decide.
                 self._blockhash = None
                 raise ChainError(text, transient=True) from e
             raise ChainError(text, name=name, transient=name is None) from e
@@ -257,11 +256,12 @@ class RpcGateway:
         while time.monotonic() < deadline:
             try:
                 resp = await self.client.get_signature_statuses([sig])
-            except Exception as e:  # RPC hiccup or rate limit: keep polling until the deadline
+            except Exception as e:  # RPC hiccup or rate limit: back off until the deadline
                 log.warning("confirm_poll_failed", signature=str(sig), error=str(e))
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 2.0)
+                delay = min(delay * 2, max(2.0, self.confirm_poll_s))
                 continue
+            delay = self.confirm_poll_s
             status = resp.value[0]
             if status is not None:
                 if status.err is not None:
@@ -271,5 +271,5 @@ class RpcGateway:
                     status.confirmation_status
                 ).lower().endswith(("confirmed", "finalized")):
                     return int(status.slot)
-            await asyncio.sleep(self.confirm_poll_s)
+            await asyncio.sleep(delay)
         raise ChainError(f"confirmation timeout for {sig}", transient=True)

@@ -13,11 +13,11 @@ issuer integration (authorization, clearing, reversal and refund webhooks).
 |---|---|
 | Program ID | `8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK` |
 | Devnet | deployed — [explorer](https://explorer.solana.com/address/8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obhmAwpK?cluster=devnet); mock-issuer E2E + reconciliation run against it |
-| Mainnet | not deployed; ready (verifiable build, security.txt, checklist below) |
+| Mainnet | not planned: this is a reference implementation (checklist below for anyone who forks it) |
 | Verifiable build | on-chain hash `ec365992…c68d` = `solana-verify build` of this repo (Agave 3.1.14 image) |
 | security.txt | embedded; contact gegirhasut@gmail.com, see [SECURITY.md](SECURITY.md) |
 | Program tests | 66 passing (14 unit, 18 lifecycle, 34 security; LiteSVM against the SBF binary) |
-| Backend tests | 98 passing (92 unit/service + 6 chain integration on devnet) |
+| Backend tests | 99 passing (93 unit/service + 6 chain integration on devnet) |
 <!-- STATUS:END -->
 
 ---
@@ -258,7 +258,7 @@ uv run escrow-backend reconcile --ledger ledger.jsonl
   combinations, wrong mints, Token-2022 mints with a permanent delegate,
   `u64::MAX` amounts.
 
-**Backend** (`uv run pytest --cov`, 98 tests, 75 % line+branch coverage)
+**Backend** (`uv run pytest --cov`, 99 tests, 75 % line+branch coverage)
 
 | Area | Tests | Coverage |
 |---|---|---|
@@ -278,15 +278,16 @@ capture, reversal, refund with a duplicate delivery, sequential and concurrent
 duplicate authorizations and clearings, insufficient funds, daily limit, a hold
 left to expire, a forged signature, a clearing for an unknown authorization).
 `escrow-backend reconcile` then compares the issuer ledger, the DB and the chain.
-After two full runs: 30 authorizations and 3 refunds checked, 0 mismatches.
+After three full runs: 41 authorizations and 4 refunds checked, 0 mismatches.
 
 On the public devnet RPC (`api.devnet.solana.com`) an authorization
-occasionally misses its budget because `getSignatureStatuses` is rate-limited
-(HTTP 429). That is the designed failure mode, and the run shows it working:
-the backend declines (fail-closed), the hold lands on chain a moment later, the
-worker releases it as an orphan (`worker.orphan_hold_released`), and
-reconciliation stays clean. In the last full run this hit the `reversal`
-flow (10/11 passed); run on its own, that flow passes. Use a dedicated RPC for
+occasionally misses its budget because the RPC rate-limits (HTTP 429) or stalls.
+That is the designed failure mode, and the runs show it working: the backend
+declines (fail-closed); if the hold still lands on chain, the worker releases
+it as an orphan (`worker.orphan_hold_released`); reconciliation stays clean.
+With the devnet settings above, each full run lost one flow this way (`reversal`, later
+`duplicate_concurrent_auth+clearing`, 10/11 passed); each passes when run on its
+own. Use a dedicated RPC for
 anything beyond a demo.
 
 ## Deployments
@@ -328,12 +329,12 @@ solana-verify get-program-hash -u devnet 8PyM1gDSssAqmn1qNPcwQ2y6nxFjUGwhPp81obh
 
 On devnet both print `ec365992…c68d`. Solana Explorer still shows *Program Not
 Verified* there: the OtterSec verification service that sets that badge only
-accepts mainnet programs. On mainnet the badge comes from the last step of the
+accepts mainnet programs. On mainnet the badge would come from step 4 of the
 checklist below.
 
 ### Mainnet
 
-Not deployed: it needs explicit sign-off and real SOL. Checklist:
+Not planned for this project. If you fork it and deploy to mainnet:
 
 1. **Keys.** A dedicated upgrade authority, ideally a multisig (e.g. Squads),
    plus separate operator and settlement-authority keys. Never reuse the devnet
@@ -348,7 +349,8 @@ Not deployed: it needs explicit sign-off and real SOL. Checklist:
    `solana-verify verify-from-repo -u mainnet --program-id <id> --library-name card_escrow https://github.com/Gegirhasut/solana-card-escrow --commit-hash <tag>`,
    accept the on-chain verification PDA upload, then
    `solana-verify remote submit-job --program-id <id> --uploader <authority>`.
-5. **Bootstrap** with the real mint: `bootstrap --mint EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --no-users`.
+5. **Bootstrap** with the real mint (no demo users unless `--users`):
+   `bootstrap --cluster mainnet --rpc-url <your RPC> --mint EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`.
 6. **Backend** on a dedicated RPC with the default timings, the webhook secret
    from the issuer, and Postgres and Redis that are backed up.
 
