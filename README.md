@@ -1,4 +1,4 @@
-# card-escrow
+# Solana Card Escrow
 
 **Non-custodial escrow for crypto card top-ups with authorization holds** — an
 Anchor program on Solana plus a Python/FastAPI backend that simulates a card
@@ -16,11 +16,27 @@ issuer integration (authorization, clearing, reversal and refund webhooks).
 | Mainnet | not planned: this is a reference implementation (checklist below for anyone who forks it) |
 | Verifiable build | on-chain hash `981549c9…4332` = `solana-verify build` of this repo (Agave 3.1.14 image) |
 | security.txt | embedded; contact gegirhasut@gmail.com, see [SECURITY.md](SECURITY.md) |
-| Program tests | 69 passing (14 unit, 18 lifecycle, 37 security; LiteSVM against the SBF binary) |
-| Backend tests | 119 passing (113 unit/service + 6 chain integration on devnet) |
+| Program tests | 69 passed in the [verified CI run](https://github.com/Gegirhasut/solana-card-escrow/actions/runs/37640523577): 14 native unit tests + 18 lifecycle and 37 security tests using LiteSVM against the SBF binary |
+| Backend tests | 113 passed in the [verified CI run](https://github.com/Gegirhasut/solana-card-escrow/actions/runs/37640523577); 6 opt-in chain integration tests were deselected |
 <!-- STATUS:END -->
 
 ---
+
+## Engineering overview
+
+This project models the boundary between a card payment lifecycle and on-chain
+settlement. The backend approves an authorization only after a hold is confirmed,
+then handles clearing, reversals and refunds as separate idempotent operations.
+Timeouts decline safely; a worker compensates for holds that landed after a decline.
+Three-way reconciliation compares on-chain state, PostgreSQL records and the
+simulated issuer ledger to expose mismatches.
+
+The implementation combines **Rust/Anchor, Python/FastAPI, PostgreSQL and Redis**.
+Start with the architecture below, then inspect the [authorization service](backend/src/escrow_backend/services/authorizations.py),
+[reconciliation](backend/src/escrow_backend/reconcile.py) and
+[security tests](programs/card_escrow/tests/test_security.rs).
+The devnet demonstration and simulated issuer are engineering evidence, not a
+production card integration or an independent security audit.
 
 ## Why
 
